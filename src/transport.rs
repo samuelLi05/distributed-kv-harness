@@ -421,7 +421,9 @@ async fn serve_connection(
         let coordinator = coordinator.clone();
         let writer = writer.clone();
         let metrics = metrics.clone();
+        let activity = crate::activity::Activity::new(metrics.clone());
         handlers.spawn(async move {
+            let _activity = activity;
             let _permit = permit;
             let result = timeout(deadline, coordinator.on_peer(hello.from, request.payload))
                 .await

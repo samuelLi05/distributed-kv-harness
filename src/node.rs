@@ -1,6 +1,6 @@
 use crate::{
     config::ClusterConfig,
-    coordinator::{Coordinator, CoordinatorContext, CoordinatorFactory, LocalCoordinator},
+    coordinator::{Coordinator, CoordinatorContext, CoordinatorFactory},
     metrics::Metrics,
     store::JournalStore,
     transport::{FaultController, TcpTransport, serve_peers},
@@ -52,10 +52,7 @@ impl RunningNode {
         let node = config.node(node_id)?;
         let http = TcpListener::bind(node.http).await?;
         let peer = TcpListener::bind(node.peer).await?;
-        let factory: CoordinatorFactory = match config.coordinator.as_str() {
-            "abd" | "abd_basic" => crate::abd::AbdCoordinator::build,
-            _ => LocalCoordinator::build,
-        };
+        let factory = crate::protocol::factory(&config.coordinator)?;
         Self::with_listeners(config, node_id, directory, http, peer, factory).await
     }
 
@@ -126,6 +123,12 @@ impl RunningNode {
             metrics.clone(),
             stop.subscribe(),
         ));
+        if let Err(error) = coordinator.start().await {
+            let _ = stop.send(true);
+            let _ = peer.await;
+            store.close().await;
+            return Err(error);
+        }
         let http = tokio::spawn(async move {
             axum::serve(http_listener, app)
                 .with_graceful_shutdown(async move {
@@ -157,6 +160,7 @@ impl RunningNode {
             task.await
                 .map_err(|e| KvError::unavailable(e.to_string()))?;
         }
+        self.coordinator.shutdown().await;
         self.store.close().await;
         Ok(())
     }
@@ -201,7 +205,10 @@ async fn status(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "node_id": state.node_id,
         "coordinator": state.coordinator.name(),
-        "guarantee": match state.coordinator.name() { "local" => "unreplicated_single_owner", "abd" | "abd_basic" => "static_rf3_linearizable_durable_quorum", _ => "coordinator_defined" },
+        "guarantee": crate::protocol::descriptor(state.coordinator.name()).map(|d| d.guarantee).unwrap_or("coordinator_defined"),
+        "protocol": crate::protocol::descriptor(state.coordinator.name()).ok(),
+        "ready": state.coordinator.ready(),
+        "diagnostics": state.coordinator.diagnostics(),
         "shards": state.config.shards,
         "metrics": state.metrics.snapshot(),
         "process": crate::resources::usage(),
@@ -210,7 +217,9 @@ async fn status(State(state): State<AppState>) -> Json<Value> {
 
 async fn invoke(state: AppState, operation: Operation) -> Response {
     state.metrics.http_requests.fetch_add(1, Ordering::Relaxed);
+    let _activity = crate::activity::Activity::new(state.metrics.clone());
     let result = match operation.validate() {
+        Ok(()) if !state.coordinator.ready() => Err(KvError::unavailable("coordinator recovering")),
         Ok(()) => state.coordinator.execute(operation.clone()).await,
         Err(error) => Err(error),
     };

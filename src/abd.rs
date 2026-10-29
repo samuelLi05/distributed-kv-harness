@@ -70,6 +70,7 @@ struct Apply {
     key: String,
     proposed: Register,
     reply: oneshot::Sender<Result<Tag, KvError>>,
+    _activity: crate::activity::Activity,
 }
 struct Core {
     context: CoordinatorContext,
@@ -181,6 +182,7 @@ impl Core {
                         key,
                         proposed: state,
                         reply,
+                        _activity: crate::activity::Activity::new(self.context.metrics.clone()),
                     })
                     .await
                     .map_err(|_| KvError::storage("apply worker stopped"))?;

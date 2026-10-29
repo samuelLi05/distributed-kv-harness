@@ -36,6 +36,7 @@ enum Command {
         records: Vec<Record>,
         frame: Vec<u8>,
         reply: oneshot::Sender<Result<(), KvError>>,
+        _activity: crate::activity::Activity,
     },
     Close(oneshot::Sender<()>),
 }
@@ -45,6 +46,7 @@ pub struct JournalStore {
     failed: Arc<AtomicBool>,
     tx: mpsc::Sender<Command>,
     pub faults: Arc<JournalFaults>,
+    metrics: Arc<Metrics>,
 }
 
 #[derive(Clone, Copy)]
@@ -137,6 +139,7 @@ impl JournalStore {
             failed: failed.clone(),
             tx,
             faults: faults.clone(),
+            metrics: metrics.clone(),
         });
         std::thread::Builder::new()
             .name("kv-journal".into())
@@ -172,6 +175,7 @@ impl JournalStore {
                 records,
                 frame,
                 reply,
+                _activity: crate::activity::Activity::new(self.metrics.clone()),
             })
             .await
             .map_err(|_| KvError::storage("journal writer stopped"))?;

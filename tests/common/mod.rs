@@ -67,7 +67,9 @@ impl Cluster {
             nodes: configs,
             shards: (0..count * 4)
                 .map(|i| {
-                    if protocol.starts_with("abd") {
+                    if distributed_kv_harness::protocol::descriptor(protocol)
+                        .is_ok_and(|d| d.replicas == 3)
+                    {
                         let base = (i % (count / 3)) * 3;
                         (base + 1..=base + 3).map(|id| id as u64).collect()
                     } else {

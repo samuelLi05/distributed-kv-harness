@@ -107,7 +107,8 @@ def main():
     parser.add_argument("--rates", default="500,2000")
     parser.add_argument("--workloads", default=",".join(WORKLOADS))
     parser.add_argument("--ingress", choices=["owner", "random"], default="random")
-    parser.add_argument("--seconds", type=float, default=5)
+    parser.add_argument("--seconds", type=float, default=15)
+    parser.add_argument("--warmup", type=float, default=3)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--keys", type=int, default=100000)
     parser.add_argument("--payload", type=int, default=1024)
@@ -118,12 +119,14 @@ def main():
     rates = [int(n) for n in args.rates.split(",")]
     workloads = args.workloads.split(",")
     assert all(n >= 3 and n % 3 == 0 for n in counts)
-    assert all(p in ("abd", "abd_basic") for p in protocols)
+
     assert all(w in WORKLOADS for w in workloads)
     assert args.repeats > 0 and args.seconds > 0 and args.keys > 0
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     binary, bench = args.binary.resolve(strict=True), args.driver.resolve(strict=True)
+    registry = {d["name"]: d for d in json.loads(subprocess.check_output([str(binary), "--protocols"], text=True))}
+    assert all(p in registry and registry[p]["replicas"] == 3 for p in protocols)
     metadata = {
         "arguments": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "platform": platform.platform(), "machine": platform.machine(), "logical_cpus": os.cpu_count(),
@@ -132,7 +135,7 @@ def main():
         "git_status": subprocess.check_output(["git", "status", "--short"], text=True),
         "git_diff": subprocess.check_output(["git", "diff"], text=True),
         "binaries_sha256": {"server":hashlib.sha256(binary.read_bytes()).hexdigest(), "driver":hashlib.sha256(bench.read_bytes()).hexdigest()},
-        "server_runtime_threads_per_process": 2, "driver_runtime_threads": 4,
+        "protocol_registry": registry, "server_runtime_threads_per_process": 2, "driver_runtime_threads": 4,
         "physical_hosts": 1, "cpu_measurement": "self getrusage, microsecond CPU accounting; peak RSS since process boot",
         "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -200,15 +203,15 @@ def main():
                             mutations, active = WORKLOADS[workload]
                             spec = {**base, "mode": "run", "rate": rate, "mutation_percent": mutations,
                                     "active_keys": active or args.keys, "ingress": args.ingress,
-                                    "seed": 7163 + repeat * 100 + workloads.index(workload)}
-                            driver(bench, output, name + "-warm", {**spec, "seconds": min(0.5, args.seconds)}, config["nodes"])
-                            time.sleep(0.05)
-                            before = [get_status(node["http"])["metrics"] for node in config["nodes"]]
-                            cpu_before = process_stats(config["nodes"])
+                                    "seed": 7163 + repeat * 100 + workloads.index(workload),
+                                    "warmup_seconds": args.warmup, "capture_resources": True, "run_id": len(rows)+1}
                             result = driver(bench, output, name, spec, config["nodes"])
-                            time.sleep(0.05)  # Include trailing replica work in resource counters.
-                            cpu_after = process_stats(config["nodes"])
-                            after = [get_status(node["http"])["metrics"] for node in config["nodes"]]
+                            assert result["settled"], "protocol work did not drain; inspect counters"
+                            before_status, after_status = result["resources_before"], result["resources_after"]
+                            before = [s["metrics"] for s in before_status]
+                            after = [s["metrics"] for s in after_status]
+                            cpu_before = {str(s["node_id"]):s["process"] for s in before_status}
+                            cpu_after = {str(s["node_id"]):s["process"] for s in after_status}
                             result["server_metrics_delta"] = [{key: b[key]-a[key] for key in a} for a,b in zip(before,after)]
                             result["server_metrics_before"] = before
                             result["server_metrics_after"] = after

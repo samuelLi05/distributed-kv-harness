@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]
 pub struct Metrics {
+    pub work_pending: AtomicU64,
     pub http_requests: AtomicU64,
     pub http_errors: AtomicU64,
     pub forwarded: AtomicU64,
@@ -21,6 +22,7 @@ pub struct Metrics {
 
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
+    pub work_pending: u64,
     pub http_requests: u64,
     pub http_errors: u64,
     pub forwarded: u64,
@@ -41,6 +43,7 @@ impl Metrics {
     pub fn snapshot(&self) -> Snapshot {
         let get = |v: &AtomicU64| v.load(Ordering::Relaxed);
         Snapshot {
+            work_pending: get(&self.work_pending),
             http_requests: get(&self.http_requests),
             http_errors: get(&self.http_errors),
             forwarded: get(&self.forwarded),

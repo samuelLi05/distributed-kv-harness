@@ -17,6 +17,19 @@ pub trait Coordinator: Send + Sync {
     fn initialize(&self) -> BoxFuture<'_, Result<(), KvError>> {
         Box::pin(async { Ok(()) })
     }
+    /// Called after peer listeners are running. Network recovery must not run in initialize.
+    fn start(&self) -> BoxFuture<'_, Result<(), KvError>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn ready(&self) -> bool {
+        true
+    }
+    fn diagnostics(&self) -> Value {
+        serde_json::json!({})
+    }
+    fn shutdown(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
     fn execute(&self, operation: Operation) -> BoxFuture<'_, Result<Outcome, KvError>>;
     fn on_peer(&self, from: NodeId, payload: Value) -> BoxFuture<'_, Result<Value, KvError>>;
 }

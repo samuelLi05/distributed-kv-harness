@@ -218,13 +218,16 @@ async fn interrupted_write_with_lost_acks_is_recovered_by_read_repair() {
         .unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let stores = network
+            let deliveries = network
                 .pending()
                 .into_iter()
                 .filter(|(_, _, _, v)| v["kind"] == "store")
                 .collect::<Vec<_>>();
-            if stores.len() == 2 {
-                for (id, _, to, _) in stores {
+            if deliveries.len() == 2 {
+                while stores[0].get("_abd/data/x").unwrap().is_none() {
+                    tokio::task::yield_now().await;
+                }
+                for (id, _, to, _) in deliveries {
                     network
                         .step(Step {
                             id,

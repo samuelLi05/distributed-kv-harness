@@ -24,6 +24,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             }
             "--data-dir" => directory = arguments.next().map(PathBuf::from),
+            "--protocols" => {
+                println!(
+                    "{}",
+                    serde_json::to_string(distributed_kv_harness::protocol::PROTOCOLS)?
+                );
+                return Ok(());
+            }
             "--help" | "-h" => {
                 println!(
                     "distributed-kv-harness --config PATH --node ID --data-dir PATH\n\nCoordinators: local (unreplicated), abd (RF=3, fast reads), abd_basic (RF=3, two-phase reads)."
