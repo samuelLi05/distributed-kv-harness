@@ -1,0 +1,7 @@
+{
+  "cluster_id": "local-single-v1",
+  "coordinator": "local",
+  "nodes": [{"id": 1, "http": "127.0.0.1:8080", "peer": "127.0.0.1:9080"}],
+  "shards": [[1]],
+  "rpc_timeout_ms": 2000
+}
