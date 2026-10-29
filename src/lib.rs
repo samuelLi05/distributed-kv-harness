@@ -3,6 +3,7 @@ pub mod abd;
 pub mod activity;
 pub mod config;
 pub mod coordinator;
+pub mod gus;
 pub mod history;
 pub mod http_client;
 pub mod metrics;

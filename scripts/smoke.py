@@ -33,7 +33,7 @@ def stable_hash(key):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=Path("target/debug/distributed-kv-harness"))
-    parser.add_argument("--protocol", choices=["local", "abd", "abd_basic"], default="local")
+    parser.add_argument("--protocol", choices=["local", "abd", "abd_basic", "gus"], default="local")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     processes = {}

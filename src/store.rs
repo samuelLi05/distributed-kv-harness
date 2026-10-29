@@ -158,6 +158,21 @@ impl JournalStore {
         Ok(map.get(key).cloned())
     }
 
+    /// Recovery-only snapshot; protocols build typed indexes before serving.
+    pub fn records(&self, prefix: &str) -> Result<Vec<(String, Value)>, KvError> {
+        if self.failed.load(Ordering::Acquire) {
+            return Err(KvError::storage("store closed or failed"));
+        }
+        Ok(self
+            .state
+            .read()
+            .map_err(|_| KvError::storage("store lock poisoned"))?
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
+    }
+
     /// Atomically publishes all records after their WAL entry is durably synced.
     pub async fn commit(&self, records: Vec<Record>) -> Result<(), KvError> {
         if self.failed.load(Ordering::Acquire) {

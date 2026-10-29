@@ -18,6 +18,15 @@ pub struct Descriptor {
 
 pub const PROTOCOLS: &[Descriptor] = &[
     Descriptor {
+        name: "gus",
+        replicas: 3,
+        guarantee: "static_rf3_linearizable_durable_quorum",
+        majority_progress: true,
+        clock_independent_safety: true,
+        experimental: true,
+        ingress: "replica_forwarding",
+    },
+    Descriptor {
         name: "local",
         replicas: 1,
         guarantee: "unreplicated_single_owner",
@@ -53,6 +62,7 @@ pub fn descriptor(name: &str) -> Result<&'static Descriptor, KvError> {
 }
 pub fn factory(name: &str) -> Result<CoordinatorFactory, KvError> {
     match descriptor(name)?.name {
+        "gus" => Ok(crate::gus::GusCoordinator::build),
         "local" => Ok(LocalCoordinator::build),
         "abd" | "abd_basic" => Ok(crate::abd::AbdCoordinator::build),
         _ => Err(KvError::invalid("coordinator not built")),

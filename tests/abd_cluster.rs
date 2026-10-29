@@ -13,8 +13,17 @@ use std::sync::{
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_histories_and_durable_restarts_for_both_modes() {
-    for protocol in ["abd_basic", "abd"] {
-        let mut cluster = Cluster::start(3, protocol, AbdCoordinator::build).await;
+    for descriptor in distributed_kv_harness::protocol::PROTOCOLS
+        .iter()
+        .filter(|d| d.majority_progress)
+    {
+        let protocol = descriptor.name;
+        let mut cluster = Cluster::start(
+            3,
+            protocol,
+            distributed_kv_harness::protocol::factory(protocol).unwrap(),
+        )
+        .await;
         for round in 0..8 {
             let key = format!("history-{round}");
             let clock = Arc::new(AtomicU64::new(1));
@@ -123,58 +132,69 @@ async fn concurrent_histories_and_durable_restarts_for_both_modes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn partitions_refuse_minority_reads_and_heal_without_resurrection() {
-    let cluster = Cluster::start(3, "abd", AbdCoordinator::build).await;
-    assert_eq!(
-        http(cluster.address(0), "PUT", "/x", r#"{"old":true}"#)
-            .await
-            .status,
-        201
-    );
-    for other in [1, 2] {
-        cluster.nodes[2]
-            .as_ref()
-            .unwrap()
-            .faults
-            .set(other, LinkFault::Block);
-        cluster.nodes[(other - 1) as usize]
-            .as_ref()
-            .unwrap()
-            .faults
-            .set(3, LinkFault::Block);
-    }
-    assert_eq!(
-        http(cluster.address(0), "DELETE", "/x", "").await.status,
-        204
-    );
-    assert_eq!(
-        http(cluster.address(1), "PUT", "/new", r#"{"v":3}"#)
-            .await
-            .status,
-        201
-    );
-    for key in ["x", "new", "missing"] {
+    for descriptor in distributed_kv_harness::protocol::PROTOCOLS
+        .iter()
+        .filter(|d| d.majority_progress)
+    {
+        let protocol = descriptor.name;
+        let cluster = Cluster::start(
+            3,
+            protocol,
+            distributed_kv_harness::protocol::factory(protocol).unwrap(),
+        )
+        .await;
         assert_eq!(
-            http(cluster.address(2), "GET", &format!("/{key}"), "")
+            http(cluster.address(0), "PUT", "/x", r#"{"old":true}"#)
+                .await
+                .status,
+            201
+        );
+        for other in [1, 2] {
+            cluster.nodes[2]
+                .as_ref()
+                .unwrap()
+                .faults
+                .set(other, LinkFault::Block);
+            cluster.nodes[(other - 1) as usize]
+                .as_ref()
+                .unwrap()
+                .faults
+                .set(3, LinkFault::Block);
+        }
+        assert_eq!(
+            http(cluster.address(0), "DELETE", "/x", "").await.status,
+            204
+        );
+        assert_eq!(
+            http(cluster.address(1), "PUT", "/new", r#"{"v":3}"#)
+                .await
+                .status,
+            201
+        );
+        for key in ["x", "new", "missing"] {
+            assert_eq!(
+                http(cluster.address(2), "GET", &format!("/{key}"), "")
+                    .await
+                    .status,
+                503
+            );
+        }
+        assert_eq!(
+            http(cluster.address(2), "PUT", "/new", r#"{"minority":true}"#)
                 .await
                 .status,
             503
         );
+        for node in &cluster.nodes {
+            node.as_ref().unwrap().faults.clear();
+        }
+        assert_eq!(http(cluster.address(2), "GET", "/x", "").await.status, 404);
+        assert_eq!(
+            http(cluster.address(2), "GET", "/new", "").await.json(),
+            json!({"v":3})
+        );
+        cluster.shutdown().await;
     }
-    assert_eq!(
-        http(cluster.address(2), "PUT", "/new", r#"{"minority":true}"#)
-            .await
-            .status,
-        503
-    );
-    for node in &cluster.nodes {
-        node.as_ref().unwrap().faults.clear();
-    }
-    assert_eq!(http(cluster.address(2), "GET", "/x", "").await.status, 404);
-    assert_eq!(
-        http(cluster.address(2), "GET", "/new", "").await.json(),
-        json!({"v":3})
-    );
-    cluster.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
