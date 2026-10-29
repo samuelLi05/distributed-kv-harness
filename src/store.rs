@@ -9,8 +9,8 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::Path,
     sync::{
-        Arc, RwLock,
-        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex, RwLock,
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
 };
 use tokio::sync::{mpsc, oneshot};
@@ -44,6 +44,57 @@ pub struct JournalStore {
     state: Arc<RwLock<HashMap<String, Value>>>,
     failed: Arc<AtomicBool>,
     tx: mpsc::Sender<Command>,
+    pub faults: Arc<JournalFaults>,
+}
+
+#[derive(Clone, Copy)]
+pub enum PausePoint {
+    BeforeAppend = 1,
+    BeforeSync = 2,
+    AfterSync = 3,
+    BeforeAck = 4,
+}
+#[derive(Default)]
+pub struct JournalFaults {
+    point: AtomicU8,
+    reached: AtomicBool,
+    lock: Mutex<()>,
+    wake: Condvar,
+}
+pub struct JournalPause(Arc<JournalFaults>);
+impl JournalFaults {
+    pub fn pause(self: &Arc<Self>, point: PausePoint) -> JournalPause {
+        assert_eq!(
+            self.point.load(Ordering::Acquire),
+            0,
+            "journal already paused"
+        );
+        self.reached.store(false, Ordering::Release);
+        self.point.store(point as u8, Ordering::Release);
+        JournalPause(self.clone())
+    }
+    fn checkpoint(&self, point: PausePoint) {
+        if self.point.load(Ordering::Acquire) != point as u8 {
+            return;
+        }
+        let mut guard = self.lock.lock().unwrap();
+        self.reached.store(true, Ordering::Release);
+        while self.point.load(Ordering::Acquire) == point as u8 {
+            guard = self.wake.wait(guard).unwrap();
+        }
+    }
+}
+impl JournalPause {
+    pub fn reached(&self) -> bool {
+        self.0.reached.load(Ordering::Acquire)
+    }
+}
+impl Drop for JournalPause {
+    fn drop(&mut self) {
+        let _guard = self.0.lock.lock().unwrap();
+        self.0.point.store(0, Ordering::Release);
+        self.0.wake.notify_all();
+    }
 }
 
 impl JournalStore {
@@ -80,14 +131,16 @@ impl JournalStore {
         let state = Arc::new(RwLock::new(state));
         let failed = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel(256);
+        let faults = Arc::new(JournalFaults::default());
         let store = Arc::new(Self {
             state: state.clone(),
             failed: failed.clone(),
             tx,
+            faults: faults.clone(),
         });
         std::thread::Builder::new()
             .name("kv-journal".into())
-            .spawn(move || writer(file, rx, state, failed, metrics))?;
+            .spawn(move || writer(file, rx, state, failed, metrics, faults))?;
         Ok(store)
     }
 
@@ -228,6 +281,7 @@ fn writer(
     state: Arc<RwLock<HashMap<String, Value>>>,
     failed: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
+    faults: Arc<JournalFaults>,
 ) {
     while let Some(command) = rx.blocking_recv() {
         let mut group = Vec::new();
@@ -256,6 +310,7 @@ fn writer(
                 return Err(KvError::storage("journal previously failed"));
             }
             let mut bytes = 0;
+            faults.checkpoint(PausePoint::BeforeAppend);
             let mut records_written = 0;
             for command in &group {
                 if let Command::Commit { frame, records, .. } = command {
@@ -264,7 +319,13 @@ fn writer(
                     records_written += records.len() as u64;
                 }
             }
+            let flush_start = std::time::Instant::now();
+            faults.checkpoint(PausePoint::BeforeSync);
             file.sync_all()?;
+            metrics
+                .durable_flush_ns
+                .fetch_add(flush_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            faults.checkpoint(PausePoint::AfterSync);
             let mut map = state
                 .write()
                 .map_err(|_| KvError::storage("store lock poisoned"))?;
@@ -285,6 +346,7 @@ fn writer(
         if result.is_err() {
             failed.store(true, Ordering::Release);
         }
+        faults.checkpoint(PausePoint::BeforeAck);
         for command in group {
             if let Command::Commit { reply, .. } = command {
                 let _ = reply.send(result.clone());

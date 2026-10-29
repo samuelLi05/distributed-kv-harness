@@ -33,6 +33,7 @@ def stable_hash(key):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=Path("target/debug/distributed-kv-harness"))
+    parser.add_argument("--protocol", choices=["local", "abd", "abd_basic"], default="local")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     processes = {}
@@ -47,12 +48,12 @@ def main():
                 ports.append(reservation.getsockname()[1])
                 reservations.append(reservation)
             config = {
-                "cluster_id": "process-smoke-v1", "coordinator": "local",
+                "cluster_id": "process-smoke-v1", "coordinator": args.protocol,
                 "nodes": [
                     {"id": i + 1, "http": f"127.0.0.1:{ports[2*i]}", "peer": f"127.0.0.1:{ports[2*i+1]}"}
                     for i in range(3)
                 ],
-                "shards": [[1], [2], [3], [1], [2], [3]], "rpc_timeout_ms": 2000,
+                "shards": [[1], [2], [3], [1], [2], [3]] if args.protocol == "local" else [[1,2,3]] * 6, "rpc_timeout_ms": 2000,
             }
             config_path = root / "cluster.json"
             config_path.write_text(json.dumps(config))
@@ -75,7 +76,7 @@ def main():
                     try:
                         status, body = request(ports[2*index], "GET", "/__harness/status")
                         if status == 200:
-                            assert body["guarantee"] == "unreplicated_single_owner"
+                            assert body["guarantee"] == ("unreplicated_single_owner" if args.protocol == "local" else "static_rf3_linearizable_durable_quorum")
                             return
                     except (OSError, http.client.HTTPException):
                         pass
@@ -98,13 +99,16 @@ def main():
                 for ingress in range(3):
                     assert request(ports[2*ingress], "GET", f"/{key}") == (200, value)
 
-            owned_by_two = [key for key in expected if config["shards"][stable_hash(key) % len(config["shards"])][0] == 2]
+            owned_by_two = [key for key in expected if args.protocol != "local" or config["shards"][stable_hash(key) % len(config["shards"])][0] == 2]
             assert len(owned_by_two) >= 2
             kept, deleted = owned_by_two[:2]
             assert request(ports[0], "DELETE", f"/{deleted}")[0] == 204
             del expected[deleted]
             kill(1)  # Abrupt process loss, without graceful shutdown or store.close().
-            assert request(ports[0], "GET", f"/{kept}")[0] == 503
+            assert request(ports[0], "GET", f"/{kept}")[0] == (503 if args.protocol == "local" else 200)
+            if args.protocol != "local":
+                assert request(ports[0], "PUT", f"/{kept}", {"after_failure": True})[0] == 201
+                expected[kept] = {"after_failure": True}
             start(1)
             ready(1)
             assert request(ports[0], "GET", f"/{kept}") == (200, expected[kept])
@@ -120,7 +124,7 @@ def main():
                 for ingress in range(3):
                     assert request(ports[2*ingress], "GET", f"/{key}") == (200, value)
             assert request(ports[4], "GET", f"/{deleted}")[0] == 404
-            print("PASS: 3 real processes; 30 keys through all HTTP entry points; owner loss returns 503; SIGKILL/restart and whole-cluster restart preserve acknowledged values and deletion.")
+            print(f"PASS [{args.protocol}]: 3 real processes; 30 keys through all entry points; single-node failure behavior; SIGKILL/restart and whole-cluster restart preserve acknowledged values and deletion.")
         except BaseException:
             for log in root.glob("*.log"):
                 print(f"--- {log.name} ---\n{log.read_text()}")

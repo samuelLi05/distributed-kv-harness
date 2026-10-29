@@ -66,7 +66,14 @@ impl Cluster {
             coordinator: protocol.into(),
             nodes: configs,
             shards: (0..count * 4)
-                .map(|i| vec![(i % count) as u64 + 1])
+                .map(|i| {
+                    if protocol.starts_with("abd") {
+                        let base = (i % (count / 3)) * 3;
+                        (base + 1..=base + 3).map(|id| id as u64).collect()
+                    } else {
+                        vec![(i % count) as u64 + 1]
+                    }
+                })
                 .collect(),
             rpc_timeout_ms: 2000,
         });

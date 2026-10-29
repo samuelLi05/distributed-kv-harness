@@ -13,6 +13,10 @@ use std::sync::{Arc, atomic::Ordering};
 /// Implementations must validate peer payloads and tolerate dropped/cancelled client futures.
 pub trait Coordinator: Send + Sync {
     fn name(&self) -> &'static str;
+    /// Complete durable boot metadata before accepting HTTP or peer traffic.
+    fn initialize(&self) -> BoxFuture<'_, Result<(), KvError>> {
+        Box::pin(async { Ok(()) })
+    }
     fn execute(&self, operation: Operation) -> BoxFuture<'_, Result<Outcome, KvError>>;
     fn on_peer(&self, from: NodeId, payload: Value) -> BoxFuture<'_, Result<Value, KvError>>;
 }

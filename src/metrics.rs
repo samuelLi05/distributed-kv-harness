@@ -14,6 +14,9 @@ pub struct Metrics {
     pub durable_batches: AtomicU64,
     pub durable_records: AtomicU64,
     pub wal_bytes: AtomicU64,
+    pub durable_flush_ns: AtomicU64,
+    pub abd_fast_reads: AtomicU64,
+    pub abd_read_repairs: AtomicU64,
 }
 
 #[derive(Debug, Serialize)]
@@ -29,6 +32,9 @@ pub struct Snapshot {
     pub durable_batches: u64,
     pub durable_records: u64,
     pub wal_bytes: u64,
+    pub durable_flush_ns: u64,
+    pub abd_fast_reads: u64,
+    pub abd_read_repairs: u64,
 }
 
 impl Metrics {
@@ -46,6 +52,9 @@ impl Metrics {
             durable_batches: get(&self.durable_batches),
             durable_records: get(&self.durable_records),
             wal_bytes: get(&self.wal_bytes),
+            durable_flush_ns: get(&self.durable_flush_ns),
+            abd_fast_reads: get(&self.abd_fast_reads),
+            abd_read_repairs: get(&self.abd_read_repairs),
         }
     }
 }

@@ -6,3 +6,5 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo build --locked
 python3 scripts/smoke.py --binary target/debug/distributed-kv-harness
+python3 scripts/smoke.py --binary target/debug/distributed-kv-harness --protocol abd_basic
+python3 scripts/smoke.py --binary target/debug/distributed-kv-harness --protocol abd

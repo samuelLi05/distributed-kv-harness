@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--data-dir" => directory = arguments.next().map(PathBuf::from),
             "--help" | "-h" => {
                 println!(
-                    "distributed-kv-harness --config PATH --node ID --data-dir PATH\n\nThe shipped local coordinator is durable, sharded and UNREPLICATED."
+                    "distributed-kv-harness --config PATH --node ID --data-dir PATH\n\nCoordinators: local (unreplicated), abd (RF=3, fast reads), abd_basic (RF=3, two-phase reads)."
                 );
                 return Ok(());
             }
@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         directory.ok_or("--data-dir is required")?,
     )
     .await?;
-    tracing::info!(http = %node.http_address, peer = %node.peer_address, coordinator = node.coordinator.name(), "node ready (local baseline is unreplicated)");
+    tracing::info!(http = %node.http_address, peer = %node.peer_address, coordinator = node.coordinator.name(), "node ready");
     tokio::signal::ctrl_c().await?;
     node.shutdown().await?;
     Ok(())

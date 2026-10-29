@@ -52,15 +52,11 @@ impl RunningNode {
         let node = config.node(node_id)?;
         let http = TcpListener::bind(node.http).await?;
         let peer = TcpListener::bind(node.peer).await?;
-        Self::with_listeners(
-            config,
-            node_id,
-            directory,
-            http,
-            peer,
-            LocalCoordinator::build,
-        )
-        .await
+        let factory: CoordinatorFactory = match config.coordinator.as_str() {
+            "abd" | "abd_basic" => crate::abd::AbdCoordinator::build,
+            _ => LocalCoordinator::build,
+        };
+        Self::with_listeners(config, node_id, directory, http, peer, factory).await
     }
 
     /// The extension seam for a new protocol. Tests can supply prebound ephemeral listeners.
@@ -106,6 +102,10 @@ impl RunningNode {
                 return Err(error);
             }
         };
+        if let Err(error) = coordinator.initialize().await {
+            store.close().await;
+            return Err(error);
+        }
         let state = AppState {
             coordinator: coordinator.clone(),
             metrics: metrics.clone(),
@@ -201,9 +201,10 @@ async fn status(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "node_id": state.node_id,
         "coordinator": state.coordinator.name(),
-        "guarantee": if state.coordinator.name() == "local" { "unreplicated_single_owner" } else { "coordinator_defined" },
+        "guarantee": match state.coordinator.name() { "local" => "unreplicated_single_owner", "abd" | "abd_basic" => "static_rf3_linearizable_durable_quorum", _ => "coordinator_defined" },
         "shards": state.config.shards,
         "metrics": state.metrics.snapshot(),
+        "process": crate::resources::usage(),
     }))
 }
 
