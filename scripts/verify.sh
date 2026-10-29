@@ -10,3 +10,5 @@ python3 scripts/smoke.py --binary target/debug/distributed-kv-harness --protocol
 python3 scripts/smoke.py --binary target/debug/distributed-kv-harness --protocol abd
 
 python3 scripts/smoke.py --binary target/debug/distributed-kv-harness --protocol gus
+python3 scripts/smoke.py --binary target/debug/distributed-kv-harness --protocol hermes_static
+python3 scripts/smoke.py --binary target/debug/distributed-kv-harness --protocol hermes_alr_static

@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{Mutex, Semaphore, mpsc, oneshot},
+    sync::{Semaphore, mpsc, oneshot},
     task::JoinSet,
     time::timeout,
 };
@@ -137,7 +137,7 @@ struct Core {
     counter: AtomicU64,
     capacity: Arc<Semaphore>,
     background: Arc<Semaphore>,
-    routes: Mutex<HashMap<Vec<u64>, u64>>,
+    router: crate::routing::ReplicaRouter,
     active: RwLock<BTreeSet<Tag>>,
     stats: Stats,
 }
@@ -190,7 +190,7 @@ impl GusCoordinator {
             counter: AtomicU64::new(0),
             capacity: Arc::new(Semaphore::new(256)),
             background: Arc::new(Semaphore::new(512)),
-            routes: Mutex::new(HashMap::new()),
+            router: crate::routing::ReplicaRouter::default(),
             active: RwLock::new(BTreeSet::new()),
             stats: Stats::default(),
         });
@@ -747,41 +747,17 @@ impl Core {
         if owners.contains(&self.context.node_id) {
             return self.execute_owned(operation).await;
         }
-        let cached = self.routes.lock().await.get(owners).copied();
-        let target = if let Some(node) = cached {
-            node
-        } else {
-            let mut calls = JoinSet::new();
-            for &node in owners {
-                let core = self.clone();
-                let key = key.clone();
-                calls.spawn(async move { (node, core.call(node, Message::Probe { key }).await) });
-            }
-            let mut target = None;
-            while let Some(result) = calls.join_next().await {
-                if let Ok((node, Ok(Reply::Pong))) = result {
-                    target = Some(node);
-                    break;
-                }
-            }
-            let node = target.ok_or_else(|| KvError::unavailable("no Gus owner reachable"))?;
-            self.routes.lock().await.insert(owners.to_vec(), node);
-            node
-        };
-        self.context
-            .metrics
-            .forwarded
-            .fetch_add(1, Ordering::Relaxed);
-        let result = self.call(target, Message::Forward { operation }).await;
-        match result {
-            Ok(Reply::Outcome(outcome)) => Ok(outcome),
-            other => {
-                self.routes.lock().await.remove(owners);
-                match other {
-                    Err(e) => Err(e),
-                    _ => Err(KvError::protocol("invalid Gus forwarded outcome")),
-                }
-            }
+        let reply = self
+            .router
+            .forward(
+                &self.context,
+                &key,
+                serde_json::to_value(Message::Forward { operation })?,
+            )
+            .await?;
+        match serde_json::from_value(reply)? {
+            Reply::Outcome(outcome) => Ok(outcome),
+            _ => Err(KvError::protocol("invalid Gus forwarded outcome")),
         }
     }
 }

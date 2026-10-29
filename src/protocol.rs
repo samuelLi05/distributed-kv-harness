@@ -18,6 +18,24 @@ pub struct Descriptor {
 
 pub const PROTOCOLS: &[Descriptor] = &[
     Descriptor {
+        name: "hermes_static",
+        replicas: 3,
+        guarantee: "static_rf3_linearizable_durable_all_members",
+        majority_progress: false,
+        clock_independent_safety: true,
+        experimental: true,
+        ingress: "replica_forwarding",
+    },
+    Descriptor {
+        name: "hermes_alr_static",
+        replicas: 3,
+        guarantee: "static_rf3_linearizable_durable_all_members_alr",
+        majority_progress: false,
+        clock_independent_safety: true,
+        experimental: true,
+        ingress: "replica_forwarding",
+    },
+    Descriptor {
         name: "gus",
         replicas: 3,
         guarantee: "static_rf3_linearizable_durable_quorum",
@@ -63,6 +81,7 @@ pub fn descriptor(name: &str) -> Result<&'static Descriptor, KvError> {
 pub fn factory(name: &str) -> Result<CoordinatorFactory, KvError> {
     match descriptor(name)?.name {
         "gus" => Ok(crate::gus::GusCoordinator::build),
+        "hermes_static" | "hermes_alr_static" => Ok(crate::hermes::HermesCoordinator::build),
         "local" => Ok(LocalCoordinator::build),
         "abd" | "abd_basic" => Ok(crate::abd::AbdCoordinator::build),
         _ => Err(KvError::invalid("coordinator not built")),

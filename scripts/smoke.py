@@ -33,9 +33,11 @@ def stable_hash(key):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=Path("target/debug/distributed-kv-harness"))
-    parser.add_argument("--protocol", choices=["local", "abd", "abd_basic", "gus"], default="local")
+    parser.add_argument("--protocol", default="local")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
+    registry={d["name"]:d for d in json.loads(subprocess.check_output([str(binary),"--protocols"],text=True))}
+    descriptor=registry[args.protocol]
     processes = {}
     reservations = []
     with tempfile.TemporaryDirectory(prefix="distributed-kv-smoke-") as temporary:
@@ -76,7 +78,7 @@ def main():
                     try:
                         status, body = request(ports[2*index], "GET", "/__harness/status")
                         if status == 200:
-                            assert body["guarantee"] == ("unreplicated_single_owner" if args.protocol == "local" else "static_rf3_linearizable_durable_quorum")
+                            assert body["guarantee"] == descriptor["guarantee"]
                             return
                     except (OSError, http.client.HTTPException):
                         pass
@@ -106,9 +108,11 @@ def main():
             del expected[deleted]
             kill(1)  # Abrupt process loss, without graceful shutdown or store.close().
             assert request(ports[0], "GET", f"/{kept}")[0] == (503 if args.protocol == "local" else 200)
-            if args.protocol != "local":
+            if descriptor["majority_progress"]:
                 assert request(ports[0], "PUT", f"/{kept}", {"after_failure": True})[0] == 201
                 expected[kept] = {"after_failure": True}
+            elif args.protocol != "local":
+                assert request(ports[0], "PUT", "/blocked-during-failure", {"unknown": True})[0] == 503
             start(1)
             ready(1)
             assert request(ports[0], "GET", f"/{kept}") == (200, expected[kept])
