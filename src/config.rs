@@ -20,6 +20,12 @@ pub struct ClusterConfig {
     pub shards: Vec<Vec<NodeId>>,
     #[serde(default = "default_timeout")]
     pub rpc_timeout_ms: u64,
+    /// Benchmark-only symmetric per-RPC delay, applied concurrently at dispatch/reply.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub benchmark_peer_rtt_ms: u64,
+}
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 fn default_timeout() -> u64 {
     2000
@@ -38,6 +44,7 @@ impl ClusterConfig {
             || self.nodes.is_empty()
             || self.shards.is_empty()
             || self.rpc_timeout_ms == 0
+            || self.benchmark_peer_rtt_ms > 10_000
         {
             return Err(KvError::invalid(
                 "cluster, coordinator, nodes, shards and positive timeout are required",

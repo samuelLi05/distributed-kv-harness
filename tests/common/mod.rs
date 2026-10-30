@@ -48,6 +48,14 @@ impl Cluster {
         Self::start(count, "local", LocalCoordinator::build).await
     }
     pub async fn start(count: usize, protocol: &str, factory: CoordinatorFactory) -> Self {
+        Self::start_delayed(count, protocol, factory, 0).await
+    }
+    pub async fn start_delayed(
+        count: usize,
+        protocol: &str,
+        factory: CoordinatorFactory,
+        rtt_ms: u64,
+    ) -> Self {
         let directory = TestDir::new();
         let mut configs = Vec::new();
         let mut listeners = Vec::new();
@@ -78,6 +86,7 @@ impl Cluster {
                 })
                 .collect(),
             rpc_timeout_ms: 2000,
+            benchmark_peer_rtt_ms: rtt_ms,
         });
         let mut nodes = Vec::new();
         for (i, (http, peer)) in listeners.into_iter().enumerate() {

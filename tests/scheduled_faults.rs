@@ -167,6 +167,7 @@ async fn interrupted_write_with_lost_acks_is_recovered_by_read_repair() {
             .collect(),
         shards: vec![vec![1, 2, 3]],
         rpc_timeout_ms: 3000,
+        benchmark_peer_rtt_ms: 0,
     });
     let mut coordinators = Vec::new();
     let mut stores = Vec::new();
@@ -294,6 +295,7 @@ async fn restarted_nonowner_never_reuses_an_unpublished_proposal_tag() {
             .collect(),
         shards: vec![vec![1, 2, 3]],
         rpc_timeout_ms: 3000,
+        benchmark_peer_rtt_ms: 0,
     });
     let mut coordinators = Vec::new();
     let mut stores = Vec::new();

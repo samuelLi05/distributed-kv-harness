@@ -20,7 +20,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{Mutex, Semaphore, mpsc, oneshot},
+    sync::{Mutex, Notify, Semaphore, mpsc, oneshot},
     task::JoinSet,
     time::timeout,
 };
@@ -100,6 +100,8 @@ enum Reply {
 struct KeyState {
     register: Register,
     gate: Arc<Mutex<()>>,
+    changed: Arc<Notify>,
+    invalid_since: Option<tokio::time::Instant>,
 }
 struct Apply {
     message: Message,
@@ -280,18 +282,20 @@ impl Core {
                         state: serde_json::to_value(&register)?,
                     }])
                     .await?;
-                self.state.write().unwrap().entry(key).or_default().register = register;
+                let mut states = self.state.write().unwrap();
+                let state = states.entry(key).or_default();
+                state.register = register;
+                state.invalid_since = Some(tokio::time::Instant::now());
+                state.changed.notify_waiters();
                 Ok(tag)
             }
             Message::Val { key, tag } => {
                 if current.tag == tag {
-                    self.state
-                        .write()
-                        .unwrap()
-                        .entry(key)
-                        .or_default()
-                        .register
-                        .valid = true;
+                    let mut states = self.state.write().unwrap();
+                    let state = states.entry(key).or_default();
+                    state.register.valid = true;
+                    state.invalid_since = None;
+                    state.changed.notify_waiters();
                     self.stats.validations.fetch_add(1, Ordering::Relaxed);
                 } else {
                     self.stats.stale_vals.fetch_add(1, Ordering::Relaxed);
@@ -377,10 +381,35 @@ impl Core {
         }
     }
     async fn repair(self: &Arc<Self>, key: &str) -> Result<Register, KvError> {
+        let changed = self
+            .state
+            .write()
+            .unwrap()
+            .entry(key.into())
+            .or_default()
+            .changed
+            .clone();
         loop {
-            let state = self.snapshot(key);
+            let notified = changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let (state, invalid_since) = {
+                let states = self.state.read().unwrap();
+                let state = states.get(key).unwrap();
+                (state.register.clone(), state.invalid_since)
+            };
             if state.valid {
                 return Ok(state);
+            }
+            // A live invalidation normally receives VAL shortly. Waiting changes
+            // recovery timing only. Recovered invalidations replay immediately.
+            if let Some(since) = invalid_since {
+                let grace =
+                    Duration::from_millis(20 + 2 * self.context.config.benchmark_peer_rtt_ms);
+                if let Some(remaining) = grace.checked_sub(since.elapsed()) {
+                    let _ = timeout(remaining, notified).await;
+                    continue;
+                }
             }
             self.stats.replays.fetch_add(1, Ordering::Relaxed);
             self.all_remote(
@@ -592,7 +621,7 @@ impl Coordinator for HermesCoordinator {
     fn diagnostics(&self) -> Value {
         let s = &self.core.stats;
         let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
-        json!({"writes":get(&s.writes),"local_reads":get(&s.local_reads),"replays":get(&s.replays),"validations":get(&s.validations),"stale_vals":get(&s.stale_vals),"sync_batches":get(&s.sync_batches),"synced_reads":get(&s.synced_reads),"background_errors":get(&s.background_errors),"epoch":0,"membership":"immutable_all_three"})
+        json!({"writes":get(&s.writes),"local_reads":get(&s.local_reads),"replays":get(&s.replays),"validations":get(&s.validations),"stale_vals":get(&s.stale_vals),"sync_batches":get(&s.sync_batches),"synced_reads":get(&s.synced_reads),"background_errors":get(&s.background_errors),"epoch":0,"membership":"immutable_all_three","replay_grace_ms":20+2*self.core.context.config.benchmark_peer_rtt_ms})
     }
     fn initialize(&self) -> BoxFuture<'_, Result<(), KvError>> {
         Box::pin(async move {

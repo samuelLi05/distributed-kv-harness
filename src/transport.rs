@@ -20,7 +20,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{Mutex, Semaphore, mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
-    time::{interval, timeout},
+    time::{Instant, interval, timeout},
 };
 
 const MAX_FRAME: usize = 2 * 1024 * 1024;
@@ -83,6 +83,13 @@ struct Call {
     id: u64,
     payload: Value,
     reply: oneshot::Sender<Result<Value, KvError>>,
+    expires: Instant,
+    _activity: crate::activity::Activity,
+}
+struct PendingReply {
+    reply: oneshot::Sender<Result<Value, KvError>>,
+    expires: Instant,
+    _activity: crate::activity::Activity,
 }
 
 pub struct TcpTransport {
@@ -90,6 +97,8 @@ pub struct TcpTransport {
     tasks: Vec<JoinHandle<()>>,
     next_id: AtomicU64,
     deadline: Duration,
+    one_way_delay: Duration,
+    metrics: Arc<Metrics>,
     pub faults: Arc<FaultController>,
 }
 
@@ -116,7 +125,9 @@ impl TcpTransport {
             tasks,
             next_id: AtomicU64::new(1),
             deadline: Duration::from_millis(config.rpc_timeout_ms),
+            one_way_delay: Duration::from_micros(config.benchmark_peer_rtt_ms * 500),
             faults: Arc::new(FaultController::default()),
+            metrics,
         })
     }
 }
@@ -139,7 +150,11 @@ impl Transport for TcpTransport {
             if matches!(fault, LinkFault::Block) {
                 return Err(KvError::unavailable("link blocked by test fault"));
             }
+            let expires = Instant::now() + self.deadline;
             timeout(self.deadline, async {
+                if !self.one_way_delay.is_zero() {
+                    tokio::time::sleep(self.one_way_delay).await;
+                }
                 if let LinkFault::Delay(duration) = fault {
                     tokio::time::sleep(duration).await;
                 }
@@ -148,9 +163,15 @@ impl Transport for TcpTransport {
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                     .map_err(|_| KvError::unavailable("RPC id space exhausted"))?;
                 let (reply, done) = oneshot::channel();
-                tx.send(Call { id, payload, reply })
-                    .await
-                    .map_err(|_| KvError::unavailable("peer worker stopped"))?;
+                tx.send(Call {
+                    id,
+                    payload,
+                    reply,
+                    expires,
+                    _activity: crate::activity::Activity::new(self.metrics.clone()),
+                })
+                .await
+                .map_err(|_| KvError::unavailable("peer worker stopped"))?;
                 let result = done
                     .await
                     .map_err(|_| KvError::unavailable("peer connection ended"))?;
@@ -277,7 +298,7 @@ impl Drop for AbortReader {
 async fn send_call<W: AsyncWrite + Unpin>(
     writer: &mut W,
     call: Call,
-    pending: &mut HashMap<u64, oneshot::Sender<Result<Value, KvError>>>,
+    pending: &mut HashMap<u64, PendingReply>,
     metrics: &Metrics,
 ) -> Result<(), KvError> {
     if call.reply.is_closed() {
@@ -294,7 +315,14 @@ async fn send_call<W: AsyncWrite + Unpin>(
         id: call.id,
         payload: call.payload,
     };
-    pending.insert(call.id, call.reply);
+    pending.insert(
+        call.id,
+        PendingReply {
+            reply: call.reply,
+            expires: call.expires,
+            _activity: call._activity,
+        },
+    );
     write_frame(writer, &request, metrics).await?;
     metrics.rpc_requests_sent.fetch_add(1, Ordering::Relaxed);
     Ok(())
@@ -313,6 +341,11 @@ async fn run_connection(
         loop {
             let result = read_frame::<_, Reply>(&mut reader, &reader_metrics).await;
             let failed = result.is_err();
+            if result.is_ok() {
+                reader_metrics
+                    .rpc_replies_received
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             if received.send(result).await.is_err() || failed {
                 break;
             }
@@ -330,18 +363,18 @@ async fn run_connection(
                 None => break,
             },
             reply = incoming.recv() => match reply {
-                Some(Ok(reply)) => { if let Some(done) = pending.remove(&reply.id) { let _ = done.send(reply.result); } }
+                Some(Ok(reply)) => { if let Some(done) = pending.remove(&reply.id) { let _ = done.reply.send(reply.result); } }
                 Some(Err(error)) => { failure = Some(error); }
                 None => break,
             },
-            _ = tick.tick() => { pending.retain(|_, sender| !sender.is_closed()); }
+            _ = tick.tick() => { pending.retain(|_, call| call.expires>Instant::now()); }
         }
     }
     let error = failure.unwrap_or_else(|| {
         KvError::unavailable("peer connection stopped; mutation outcome may be unknown")
     });
     for (_, reply) in pending {
-        let _ = reply.send(Err(error.clone()));
+        let _ = reply.reply.send(Err(error.clone()));
     }
 }
 
@@ -422,6 +455,7 @@ async fn serve_connection(
         let writer = writer.clone();
         let metrics = metrics.clone();
         let activity = crate::activity::Activity::new(metrics.clone());
+        let config = config.clone();
         handlers.spawn(async move {
             let _activity = activity;
             let _permit = permit;
@@ -433,19 +467,29 @@ async fn serve_connection(
                         "peer handler timed out; mutation outcome may be unknown",
                     ))
                 });
+            // Delay each response independently, before taking the connection writer.
+            // This models propagation delay without serializing concurrent RPCs.
+            if config.benchmark_peer_rtt_ms > 0 {
+                tokio::time::sleep(Duration::from_micros(config.benchmark_peer_rtt_ms * 500)).await;
+            }
             let mut writer = writer.lock().await;
-            let _ = timeout(
-                deadline,
-                write_frame(
-                    &mut *writer,
-                    &Reply {
-                        id: request.id,
-                        result,
-                    },
-                    &metrics,
-                ),
-            )
-            .await;
+            if matches!(
+                timeout(
+                    deadline,
+                    write_frame(
+                        &mut *writer,
+                        &Reply {
+                            id: request.id,
+                            result
+                        },
+                        &metrics
+                    )
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
+                metrics.rpc_replies_sent.fetch_add(1, Ordering::Relaxed);
+            }
         });
         while handlers.try_join_next().is_some() {}
     }

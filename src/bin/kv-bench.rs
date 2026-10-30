@@ -385,7 +385,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .filter_map(|s| s.dispatched_ns.map(|d| d - s.scheduled_ns))
             .collect::<Vec<_>>();
-        operations.insert(method,json!({"offered":group.len(),"errors":group.iter().filter(|s|s.error.is_some()).count(),"service_ns":{"p50":percentile(&mut service,50),"p95":percentile(&mut service,95),"p99":percentile(&mut service,99)},"scheduled_ns":{"p50":percentile(&mut scheduled,50),"p95":percentile(&mut scheduled,95),"p99":percentile(&mut scheduled,99)},"queue_ns":{"p50":percentile(&mut queue,50),"p99":percentile(&mut queue,99)}}));
+        let mut successful_service = group
+            .iter()
+            .filter(|s| s.error.is_none())
+            .filter_map(|s| s.dispatched_ns.map(|d| s.completed_ns - d))
+            .collect::<Vec<_>>();
+        let mut successful_scheduled = group
+            .iter()
+            .filter(|s| s.error.is_none())
+            .map(|s| s.completed_ns - s.scheduled_ns)
+            .collect::<Vec<_>>();
+        operations.insert(method,json!({"offered":group.len(),"errors":group.iter().filter(|s|s.error.is_some()).count(),"successful_service_ns":{"p50":percentile(&mut successful_service,50),"p95":percentile(&mut successful_service,95),"p99":percentile(&mut successful_service,99)},"successful_scheduled_ns":{"p50":percentile(&mut successful_scheduled,50),"p95":percentile(&mut successful_scheduled,95),"p99":percentile(&mut successful_scheduled,99)},"service_ns":{"p50":percentile(&mut service,50),"p95":percentile(&mut service,95),"p99":percentile(&mut service,99)},"scheduled_ns":{"p50":percentile(&mut scheduled,50),"p95":percentile(&mut scheduled,95),"p99":percentile(&mut scheduled,99)},"queue_ns":{"p50":percentile(&mut queue,50),"p99":percentile(&mut queue,99)}}));
     }
     let duration = if spec.mode == "preload" {
         elapsed

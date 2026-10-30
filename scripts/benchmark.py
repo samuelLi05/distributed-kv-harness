@@ -69,7 +69,7 @@ def driver(binary, output, name, spec, servers):
             while process.poll() is None:
                 if time.monotonic() - started > 600:
                     raise RuntimeError("driver exceeded 600 s")
-                if time.monotonic() - last >= 0.25:
+                if not spec.get("capture_resources",False) and time.monotonic() - last >= 0.25:
                     stats = process_stats(servers)
                     for pid, item in stats.items():
                         peak[pid] = max(peak.get(pid, 0), item["peak_rss_bytes"])
@@ -88,7 +88,7 @@ def driver(binary, output, name, spec, servers):
     result["driver_whole_process_cpu_seconds"] = (
         after_usage.ru_utime + after_usage.ru_stime - before_usage.ru_utime - before_usage.ru_stime
     )
-    result["server_peak_rss_bytes_since_boot"] = peak
+    result["server_peak_rss_bytes_since_boot"] = {str(s["node_id"]):s["process"]["peak_rss_bytes"] for s in result.get("resources_after",[])} or peak
     result["driver_wall_seconds"] = time.monotonic() - started
     with samples.open("rb") as source, gzip.open(str(samples) + ".gz", "wb") as target:
         shutil.copyfileobj(source, target)
@@ -109,6 +109,8 @@ def main():
     parser.add_argument("--ingress", choices=["owner", "random"], default="random")
     parser.add_argument("--seconds", type=float, default=15)
     parser.add_argument("--warmup", type=float, default=3)
+    parser.add_argument("--peer-rtt-ms", type=int, default=0)
+    parser.add_argument("--hot-low-rate", type=int)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--keys", type=int, default=100000)
     parser.add_argument("--payload", type=int, default=1024)
@@ -165,7 +167,7 @@ def main():
                         "cluster_id": f"benchmark-{count}-{protocol}", "coordinator": protocol,
                         "nodes": [{"id": i+1, "http": f"127.0.0.1:{ports[2*i]}", "peer": f"127.0.0.1:{ports[2*i+1]}"} for i in range(count)],
                         "shards": [[3*(s % (count//3))+j for j in (1,2,3)] for s in range(256)],
-                        "rpc_timeout_ms": 2000,
+                        "rpc_timeout_ms": 2000, "benchmark_peer_rtt_ms": args.peer_rtt_ms,
                     }
                     config_path = output / f"cluster-{count}-{protocol}.json"
                     config_path.write_text(json.dumps(config, indent=2))
@@ -188,13 +190,13 @@ def main():
                                 time.sleep(0.02)
                     base = {"config": str(config_path), "mode": "preload", "rate": 1000, "seconds": args.seconds,
                             "keys": args.keys, "active_keys": args.keys, "mutation_percent": 100, "delete_percent": 0,
-                            "payload_bytes": args.payload, "ingress": "owner", "workers": args.workers, "seed": 7163}
+                            "payload_bytes": args.payload, "ingress": "owner", "workers": args.workers, "seed": 7163, "capture_resources": True}
                     driver(bench, output, f"preload-{count}-{protocol}", base, config["nodes"])
                     idle_before = [get_status(node["http"]) for node in config["nodes"]]
                     time.sleep(2)
                     idle_after = [get_status(node["http"]) for node in config["nodes"]]
                     (output / f"idle-{count}-{protocol}.json").write_text(json.dumps({"seconds":2,"before":idle_before,"after":idle_after}, indent=2))
-                    cases = [(w, rate) for w in workloads for rate in rates]
+                    cases = [(w, args.hot_low_rate if w == "hot_mixed" and args.hot_low_rate and rate == min(rates) else rate) for w in workloads for rate in rates]
                     for repeat in range(args.repeats):
                         # Rotate case order; paired protocol runs retain identical request seeds.
                         order = cases[repeat % len(cases):] + cases[:repeat % len(cases)]
@@ -218,7 +220,7 @@ def main():
                             result["server_cpu_seconds"] = {pid: cpu_after[pid]["cpu_seconds"]-item["cpu_seconds"] for pid,item in cpu_before.items()}
                             result["server_peak_rss_bytes_after"] = {pid:item["peak_rss_bytes"] for pid,item in cpu_after.items()}
                             result["wal_file_bytes_after"] = sum(p.stat().st_size for p in root.glob("*/state.wal"))
-                            result["case"] = {"nodes":count,"protocol":protocol,"workload":workload,"rate":rate,"repeat":repeat,"ingress":args.ingress}
+                            result["case"] = {"nodes":count,"protocol":protocol,"workload":workload,"rate":rate,"repeat":repeat,"ingress":args.ingress,"peer_rtt_ms":args.peer_rtt_ms}
                             (output / f"{name}.summary.json").write_text(json.dumps(result, indent=2))
                             rows.append(result)
                             (output / "results.json").write_text(json.dumps(rows, indent=2))

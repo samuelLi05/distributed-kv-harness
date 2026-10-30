@@ -409,3 +409,53 @@ async fn lost_invalidation_ack_is_replayed_with_the_same_tag_and_unknown_epochs_
     );
     c.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn normal_validation_wakes_readers_before_replay_is_started() {
+    let c = Cluster::start(
+        3,
+        "hermes_static",
+        protocol::factory("hermes_static").unwrap(),
+    )
+    .await;
+    for i in [1, 2, 0] {
+        peer(
+            &c,
+            i,
+            2,
+            Message::Inv {
+                key: "x".into(),
+                tag: tag(1, 2),
+                value: Some(json!({"v":1})),
+            },
+        )
+        .await;
+    }
+    c.nodes[0].as_ref().unwrap().faults.set(2, LinkFault::Block);
+    c.nodes[0].as_ref().unwrap().faults.set(3, LinkFault::Block);
+    let read = tokio::spawn({
+        let coordinator = c.nodes[0].as_ref().unwrap().coordinator.clone();
+        async move {
+            coordinator
+                .execute(Operation::Get { key: "x".into() })
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(3)).await;
+    peer(
+        &c,
+        0,
+        2,
+        Message::Val {
+            key: "x".into(),
+            tag: tag(1, 2),
+        },
+    )
+    .await;
+    assert_eq!(read.await.unwrap().unwrap(), Outcome::Value(json!({"v":1})));
+    assert_eq!(
+        c.nodes[0].as_ref().unwrap().coordinator.diagnostics()["replays"],
+        0
+    );
+    c.shutdown().await;
+}

@@ -7,8 +7,11 @@ Available coordinators:
 - `local`: the original durable single-owner baseline, without replication.
 - `abd_basic`: static RF=3 multi-writer ABD with two-phase quorum reads.
 - `abd`: the same implementation with a safe one-phase read when two durable replies agree on the complete tag/value.
+- `gus`: experimental durable RF=3 speculative writes and quorum/view reads.
+- `hermes_static`: fixed-membership all-ACK writes and valid local reads.
+- `hermes_alr_static`: the same fixed group with batched post-read quorum checks.
 
-Every node accepts HTTP. ABD ingress nodes contact the key's owners directly, including when the ingress owns no replica. A majority is required for every successful operation. A 2+1 partition permits the majority to progress; an ingress unable to reach two owners returns 503, including for missing-key reads. Safety uses logical versions and durable quorums, not clocks or time-based leases. This provides linearizable single-key operations under the stated crash-recovery assumptions, rather than the full etcd feature set.
+Every node accepts HTTP. ABD ingress nodes contact the key's owners directly, including when the ingress owns no replica. ABD and Gus require a majority for every successful operation. A 2+1 partition permits the majority to progress; an ingress unable to reach two owners returns 503, including for missing-key reads. Safety uses logical versions and durable quorums, not clocks or time-based leases. This provides linearizable single-key operations under the stated crash-recovery assumptions, rather than the full etcd feature set.
 
 ## Requirements and verification
 
@@ -56,7 +59,7 @@ Run one command per terminal:
 
 PUT a key through port 8081 and GET it through ports 8082 or 8083. Each request is served by, or forwarded to, the same configured owner. This demonstrates routing, not replication. All three entry points report `unreplicated_single_owner` at `/__harness/status`.
 
-Placement uses fixed FNV-1a 64-bit over decoded key bytes, modulo the explicit shard count. `shards[i]` is an ordered list of replica IDs. The local baseline requires one ID per list; both ABD modes require three. All nodes use the same config file. Peer handshakes check the full configuration, sender/destination IDs, and wire version. A configuration mismatch fails rather than serving a different ownership map. This is a trusted local experimental network; peer identities are configuration checks, not authentication.
+Placement uses fixed FNV-1a 64-bit over decoded key bytes, modulo the explicit shard count. `shards[i]` is an ordered list of replica IDs. The local baseline requires one ID per list; all replicated adapters require three. All nodes use the same config file. Peer handshakes check the full configuration, sender/destination IDs, and wire version. A configuration mismatch fails rather than serving a different ownership map. This is a trusted local experimental network; peer identities are configuration checks, not authentication.
 
 ## Plug in coordination
 
@@ -137,3 +140,5 @@ Use the same cluster JSON with `coordinator` changed to the selected name and fr
 The driver accepts `warmup_seconds`, `capture_resources` and `run_id`. Warmup uses the same worker HTTP clients as measurement, every PUT changes its fixed-size object, and resources are measured after outstanding work drains. Use `python3 scripts/benchmark.py --protocols abd,gus --nodes 3 --rates 250 --seconds 15 --warmup 3 --repeats 5 --output work/comparison` after building release binaries. Original historical results use an older driver and must remain separate.
 
 `hermes_static` and `hermes_alr_static` are **fixed-membership experiments**. Both require all three replicas for writes and interrupted-operation replay. The former reads valid local state; the latter adds an opportunistically batched post-read quorum check. They do not implement membership changes or majority write failover and must not be ranked as having ABD/Gus availability. Invalidation is durable; validation is volatile, so keys replay after restart. `scripts/verify.sh` tests every shipped adapter, including real-process crashes.
+
+The optional cluster field `benchmark_peer_rtt_ms` adds symmetric RPC dispatch/reply delay; default zero preserves existing configurations. It is a benchmark model, not a clock assumption. `--peer-rtt-ms` selects it in the orchestrator. Use `--hot-low-rate 100` when the usual light load already overloads a hot-key adapter. `scripts/compare_protocols.py RUNS ... --output REPORT` aggregates arbitrary adapters/settings without pooling different builds or window lengths; `scripts/audit_benchmarks.py RUNS ...` checks raw arrival and counter accounting.

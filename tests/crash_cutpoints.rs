@@ -36,6 +36,7 @@ fn config() -> Arc<ClusterConfig> {
             .collect(),
         shards: vec![vec![1, 2, 3]],
         rpc_timeout_ms: 2000,
+        benchmark_peer_rtt_ms: 0,
     })
 }
 fn state(counter: u64) -> Register {

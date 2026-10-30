@@ -404,6 +404,7 @@ async fn scheduled_loss_duplication_and_reordering_preserve_unknown_history() {
             .collect(),
         shards: vec![vec![1, 2, 3]],
         rpc_timeout_ms: 300,
+        benchmark_peer_rtt_ms: 0,
     });
     let mut coordinators = Vec::new();
     let mut stores = Vec::new();
