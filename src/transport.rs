@@ -25,7 +25,7 @@ use tokio::{
 
 const MAX_FRAME: usize = 2 * 1024 * 1024;
 const MAX_PENDING: usize = 256;
-const WIRE_VERSION: u32 = 1;
+pub const WIRE_VERSION: u32 = 2;
 
 pub trait Transport: Send + Sync {
     fn request(&self, to: NodeId, payload: Value) -> BoxFuture<'_, Result<Value, KvError>>;

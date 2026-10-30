@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "distributed-kv-harness --config PATH --node ID --data-dir PATH\n\nCoordinators: local (unreplicated), abd (RF=3, fast reads), abd_basic (RF=3, two-phase reads)."
+                    "distributed-kv-harness --config PATH --node ID --data-dir PATH\n\nCoordinators: local, abd_basic, abd, gus, hermes_static, hermes_alr_static. Use --protocols for contracts."
                 );
                 return Ok(());
             }

@@ -27,3 +27,9 @@ The configuration is immutable. Members are never removed, and neither side of a
 `hermes_alr_static` buffers eligible local values and returns them after a subsequent majority confirmation of the fixed epoch. It batches already-pending reads (maximum 128), without a batching timer. This prices the ALR data path and refuses minority reads; it does not implement or validate configuration agreement, fencing, state transfer, or failover. Unknown epochs fail closed.
 
 References: [Hermes, ASPLOS 2020](https://vasigavr1.github.io/files/Hermes-ASPLOS20.pdf), [LAW theorem and ALR, VLDB 2025](https://www.vldb.org/pvldb/vol18/p2831-giortamis.pdf). The common request/reply transport sends empty replies for VAL and view messages as well. Those frames are included in the measured traffic.
+
+## Read-copy ordering and state compatibility
+
+Read repair now has a distinct conditional apply mode, with the freshness check inside the serialized worker. A newer receiver rejects the copy and the reader refreshes its evidence. Only the original writer can issue a larger-tag commit. Delayed offers preserve prior installation and the original acceptance ACK rather than downgrading the durable installed flag or incorrectly causing another retag. Receipt/writer messages are restricted to the owning cohort.
+
+Gus now rejects old experimental state schemas and the shared transport rejects the earlier wire generation. All servers in an experiment use the same build. Retained bookkeeping entries are counted incrementally, removing a dataset scan from the status/measurement path.

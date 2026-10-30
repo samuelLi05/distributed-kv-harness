@@ -202,6 +202,23 @@ async fn nonowner_forwarding_and_many_changing_value_histories() {
     use distributed_kv_harness::history::{Recorder, Verdict, check};
     let c = Cluster::start(6, "gus", protocol::factory("gus").unwrap()).await;
     let key = c.key_for(1);
+    assert!(
+        c.nodes[0]
+            .as_ref()
+            .unwrap()
+            .coordinator
+            .on_peer(
+                6,
+                serde_json::to_value(Message::Offer {
+                    key: key.clone(),
+                    id: tag(1, 6),
+                    value: Some(json!({"outside_group":true}))
+                })
+                .unwrap()
+            )
+            .await
+            .is_err()
+    );
     assert_eq!(
         http(
             c.address(5),
@@ -502,4 +519,96 @@ async fn scheduled_loss_duplication_and_reordering_preserve_unknown_history() {
     for store in stores {
         store.close().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delayed_offer_after_read_copy_preserves_eligibility_and_original_acceptance() {
+    let mut c = Cluster::start(3, "gus", protocol::factory("gus").unwrap()).await;
+    let id = tag(1, 2);
+    peer(
+        &c,
+        2,
+        2,
+        Message::Offer {
+            key: "x".into(),
+            id,
+            value: Some(json!({"copied":true})),
+        },
+    )
+    .await;
+    let version = Version {
+        key: "x".into(),
+        id,
+        tag: id,
+        value: Some(json!({"copied":true})),
+        installed: true,
+        observed: Tag::default(),
+    };
+    peer(
+        &c,
+        0,
+        3,
+        Message::Repair {
+            key: "x".into(),
+            version,
+        },
+    )
+    .await;
+    let reply = peer(
+        &c,
+        0,
+        2,
+        Message::Offer {
+            key: "x".into(),
+            id,
+            value: Some(json!({"copied":true})),
+        },
+    )
+    .await;
+    assert_eq!(
+        reply["data"],
+        serde_json::to_value(Tag::default()).unwrap(),
+        "a delayed original offer must not turn prior acceptance into a stale ACK"
+    );
+    let records = c.nodes[0]
+        .as_ref()
+        .unwrap()
+        .store
+        .records("_gus/version/")
+        .unwrap();
+    assert!(
+        records
+            .into_iter()
+            .map(|(_, v)| serde_json::from_value::<Version>(v).unwrap())
+            .any(|v| v.tag == id && v.installed)
+    );
+    c.stop_node(0).await;
+    c.restart_node(0).await;
+    assert_eq!(
+        http(c.address(0), "GET", "/x", "").await.json(),
+        json!({"copied":true})
+    );
+    c.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unsupported_gus_storage_generation_fails_closed() {
+    use distributed_kv_harness::{RunningNode, store::Record};
+    let mut c = Cluster::start(3, "gus", protocol::factory("gus").unwrap()).await;
+    c.nodes[0]
+        .as_ref()
+        .unwrap()
+        .store
+        .commit(vec![Record {
+            key: "_gus/format".into(),
+            state: json!(1),
+        }])
+        .await
+        .unwrap();
+    c.stop_node(0).await;
+    let result = RunningNode::start(c.config.clone(), 1, c.directory.0.join("0")).await;
+    assert!(
+        matches!(result,Err(error) if error.message.contains("unsupported experimental Gus state"))
+    );
+    c.shutdown().await;
 }

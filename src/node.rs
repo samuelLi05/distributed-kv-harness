@@ -204,6 +204,7 @@ async fn delete(State(state): State<AppState>, Path(key): Path<String>) -> Respo
 async fn status(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "node_id": state.node_id,
+        "wire_version": crate::transport::WIRE_VERSION,
         "coordinator": state.coordinator.name(),
         "guarantee": crate::protocol::descriptor(state.coordinator.name()).map(|d| d.guarantee).unwrap_or("coordinator_defined"),
         "protocol": crate::protocol::descriptor(state.coordinator.name()).ok(),

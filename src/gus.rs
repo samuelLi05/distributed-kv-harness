@@ -24,6 +24,7 @@ use tokio::{
 };
 const STRIPES: usize = 32;
 const BOOT: &str = "_gus/boot";
+const FORMAT: &str = "_gus/format";
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub struct Tag {
@@ -65,6 +66,10 @@ pub enum Message {
         #[serde(default)]
         value: Option<Version>,
     },
+    Repair {
+        key: String,
+        version: Version,
+    },
     Fetch {
         key: String,
         tag: Tag,
@@ -82,6 +87,7 @@ impl Message {
             | Self::Query { key }
             | Self::Offer { key, .. }
             | Self::Commit { key, .. }
+            | Self::Repair { key, .. }
             | Self::Fetch { key, .. }
             | Self::View { key, .. } => key,
         }
@@ -114,9 +120,15 @@ struct KeyState {
     offers: BTreeMap<Tag, Version>,
     views: BTreeMap<Tag, BTreeSet<u64>>,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApplyMode {
+    Offer,
+    Commit,
+    ReadCopy,
+}
 struct Apply {
     version: Version,
-    offer: bool,
+    mode: ApplyMode,
     reply: oneshot::Sender<Result<Version, KvError>>,
     _activity: Activity,
 }
@@ -128,6 +140,8 @@ struct Stats {
     transfers: AtomicU64,
     views: AtomicU64,
     background_errors: AtomicU64,
+    retained: AtomicU64,
+    read_retries: AtomicU64,
 }
 struct Core {
     context: CoordinatorContext,
@@ -206,7 +220,7 @@ impl GusCoordinator {
 async fn worker(core: std::sync::Weak<Core>, mut rx: mpsc::Receiver<Apply>) {
     while let Some(command) = rx.recv().await {
         let Some(core) = core.upgrade() else { break };
-        let result = core.install(command.version, command.offer).await;
+        let result = core.install(command.version, command.mode).await;
         let _ = command.reply.send(result);
     }
 }
@@ -269,13 +283,17 @@ impl Core {
             }
         }
     }
-    async fn apply(self: &Arc<Self>, version: Version, offer: bool) -> Result<Version, KvError> {
+    async fn apply(
+        self: &Arc<Self>,
+        version: Version,
+        mode: ApplyMode,
+    ) -> Result<Version, KvError> {
         let (reply, done) = oneshot::channel();
         let stripe = slot(&version.key);
         self.apply[stripe]
             .send(Apply {
                 version,
-                offer,
+                mode,
                 reply,
                 _activity: Activity::new(self.context.metrics.clone()),
             })
@@ -287,10 +305,17 @@ impl Core {
     async fn install(
         self: &Arc<Self>,
         mut version: Version,
-        offer: bool,
+        mode: ApplyMode,
     ) -> Result<Version, KvError> {
         let current = self.latest(&version.key);
-        if offer {
+        // A read must not turn a stale speculative version into a quorum receipt.
+        // The check belongs to the serialized worker, not a pre-enqueue snapshot.
+        if mode == ApplyMode::ReadCopy && current > version.tag {
+            return self
+                .version(&version.key, current)
+                .ok_or_else(|| KvError::storage("Gus latest version missing"));
+        }
+        if mode == ApplyMode::Offer {
             if let Some(prior) = self
                 .state
                 .read()
@@ -315,7 +340,7 @@ impl Core {
             if prior.id != version.id || prior.value != version.value {
                 return Err(KvError::protocol("conflicting Gus tag"));
             }
-            if prior.installed && (!offer || prior == version) {
+            if prior.installed {
                 return Ok(prior);
             }
         }
@@ -329,12 +354,20 @@ impl Core {
         {
             let mut states = self.state.write().unwrap();
             let state = states.entry(version.key.clone()).or_default();
-            if offer {
-                state.offers.insert(version.id, version.clone());
+            if mode == ApplyMode::Offer
+                && state.offers.insert(version.id, version.clone()).is_none()
+            {
+                self.stats.retained.fetch_add(1, Ordering::Relaxed);
             }
             if version.installed {
                 state.latest = state.latest.max(version.tag);
-                state.versions.insert(version.tag, version.clone());
+                if state
+                    .versions
+                    .insert(version.tag, version.clone())
+                    .is_none()
+                {
+                    self.stats.retained.fetch_add(1, Ordering::Relaxed);
+                }
                 state
                     .views
                     .entry(version.tag)
@@ -416,6 +449,11 @@ impl Core {
         {
             return Err(KvError::protocol("Gus message sent to nonowner"));
         }
+        if !matches!(&message, Message::Forward { .. } | Message::Probe { .. })
+            && !self.context.config.replicas(message.key()).contains(&from)
+        {
+            return Err(KvError::protocol("Gus message from nonowner"));
+        }
         match message {
             Message::Forward { operation } => Ok(Reply::Outcome(self.dispatch(operation).await?)),
             Message::Probe { .. } => Ok(Reply::Pong),
@@ -429,7 +467,7 @@ impl Core {
                 Ok(Reply::Viewed)
             }
             Message::Offer { key, id, value } => {
-                if id.writer != from || id.counter == 0 {
+                if id.writer != from || id.counter == 0 || id.incarnation == 0 {
                     return Err(KvError::protocol("invalid Gus offer identity"));
                 }
                 if let Some(value) = &value {
@@ -449,10 +487,47 @@ impl Core {
                             installed: false,
                             observed: Tag::default(),
                         },
-                        true,
+                        ApplyMode::Offer,
                     )
                     .await?;
                 Ok(Reply::Offer(version.observed))
+            }
+            Message::Repair { key, version } => {
+                if version.key != key
+                    || version.id.counter == 0
+                    || version.id.incarnation == 0
+                    || version.tag < version.id
+                    || version.tag.writer != version.id.writer
+                    || version.tag.incarnation != version.id.incarnation
+                    || !version.installed
+                    || (version.tag == version.id && version.observed >= version.id)
+                    || !self
+                        .context
+                        .config
+                        .replicas(&key)
+                        .contains(&version.id.writer)
+                {
+                    return Err(KvError::protocol("invalid Gus read copy"));
+                }
+                if let Some(value) = &version.value {
+                    Operation::Put {
+                        key: key.clone(),
+                        value: value.clone(),
+                    }
+                    .validate()?;
+                }
+                if version.id.writer == self.context.node_id
+                    && self.active.read().unwrap().contains(&version.id)
+                {
+                    return Ok(Reply::Busy);
+                }
+                let proposed = version.tag;
+                let installed = self.apply(version, ApplyMode::ReadCopy).await?;
+                Ok(if installed.tag == proposed {
+                    Reply::Committed
+                } else {
+                    Reply::Retagged
+                })
             }
             Message::Commit {
                 key,
@@ -460,28 +535,15 @@ impl Core {
                 tag,
                 value,
             } => {
-                if tag.counter == 0
-                    || tag < id
+                if from != id.writer
+                    || !self.context.config.replicas(&key).contains(&id.writer)
+                    || id.counter == 0
+                    || id.incarnation == 0
+                    || tag.counter <= id.counter
                     || tag.writer != id.writer
                     || tag.incarnation != id.incarnation
                 {
-                    return Err(KvError::protocol("invalid Gus commit tag"));
-                }
-                if from != id.writer
-                    && id.writer == self.context.node_id
-                    && self.active.read().unwrap().contains(&id)
-                {
-                    return Ok(Reply::Busy);
-                }
-                if from != id.writer
-                    && self
-                        .state
-                        .read()
-                        .unwrap()
-                        .get(&key)
-                        .is_some_and(|s| s.versions.values().any(|v| v.id == id && v.tag > tag))
-                {
-                    return Ok(Reply::Retagged);
+                    return Err(KvError::protocol("invalid Gus retag commit"));
                 }
                 let found = self.state.read().unwrap().get(&key).and_then(|s| {
                     s.offers
@@ -496,7 +558,7 @@ impl Core {
                     return Err(KvError::protocol("invalid Gus commit value"));
                 }
                 version.tag = tag;
-                self.apply(version, false).await?;
+                self.apply(version, ApplyMode::Commit).await?;
                 Ok(Reply::Committed)
             }
         }
@@ -631,11 +693,9 @@ impl Core {
                         match self
                             .call(
                                 node,
-                                Message::Commit {
+                                Message::Repair {
                                     key: key.clone(),
-                                    id: version.id,
-                                    tag: version.tag,
-                                    value: Some(version.clone()),
+                                    version: version.clone(),
                                 },
                             )
                             .await?
@@ -648,7 +708,11 @@ impl Core {
                             _ => return Err(KvError::protocol("Gus read recovery failed")),
                         }
                     } else {
-                        self.apply(version.clone(), false).await?;
+                        let installed = self.apply(version.clone(), ApplyMode::ReadCopy).await?;
+                        if installed.tag != version.tag {
+                            self.stats.read_retries.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
                     }
                     self.receipt(&key, version.tag, node);
                     self.stats.transfers.fetch_add(1, Ordering::Relaxed);
@@ -706,11 +770,11 @@ impl Core {
                         .checked_add(1)
                         .ok_or_else(|| KvError::unavailable("Gus timestamp exhausted"))?;
                     // Fix the tag before sending it; this task survives the HTTP future.
-                    self.apply(version.clone(), false).await?;
+                    self.apply(version.clone(), ApplyMode::Commit).await?;
                     self.commit_remote(&key, version).await?;
                 } else {
                     self.stats.fast_writes.fetch_add(1, Ordering::Relaxed);
-                    self.apply(version, false).await?;
+                    self.apply(version, ApplyMode::Commit).await?;
                 }
                 Ok(outcome)
             }
@@ -768,11 +832,20 @@ impl Coordinator for GusCoordinator {
     fn diagnostics(&self) -> Value {
         let s = &self.core.stats;
         let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
-        let states = self.core.state.read().unwrap();
-        json!({"fast_writes":get(&s.fast_writes),"retags":get(&s.retags),"fast_reads":get(&s.fast_reads),"read_transfers":get(&s.transfers),"view_messages":get(&s.views),"background_errors":get(&s.background_errors),"retained_versions":states.values().map(|s|s.versions.len()+s.offers.len()).sum::<usize>()})
+        json!({"fast_writes":get(&s.fast_writes),"retags":get(&s.retags),"fast_reads":get(&s.fast_reads),"read_transfers":get(&s.transfers),"view_messages":get(&s.views),"background_errors":get(&s.background_errors),"retained_versions":get(&s.retained),"read_retries":get(&s.read_retries),"state_schema":2})
     }
     fn initialize(&self) -> BoxFuture<'_, Result<(), KvError>> {
         Box::pin(async move {
+            let records = self.core.context.store.records("_gus/version/")?;
+            match self.core.context.store.get(FORMAT)? {
+                Some(v) if v == json!(2) => (),
+                None if records.is_empty() => (),
+                _ => {
+                    return Err(KvError::storage(
+                        "unsupported experimental Gus state; use fresh data directories",
+                    ));
+                }
+            }
             let old = self
                 .core
                 .context
@@ -790,15 +863,23 @@ impl Coordinator for GusCoordinator {
             self.core
                 .context
                 .store
-                .commit(vec![Record {
-                    key: BOOT.into(),
-                    state: json!(next),
-                }])
+                .commit(vec![
+                    Record {
+                        key: BOOT.into(),
+                        state: json!(next),
+                    },
+                    Record {
+                        key: FORMAT.into(),
+                        state: json!(2),
+                    },
+                ])
                 .await?;
-            let records = self.core.context.store.records("_gus/version/")?;
             let mut states = self.core.state.write().unwrap();
             for (_, record) in records {
                 let v: Version = serde_json::from_value(record)?;
+                if v.installed && v.tag == v.id && v.observed >= v.id {
+                    return Err(KvError::storage("invalid installed speculative version"));
+                }
                 let state = states.entry(v.key.clone()).or_default();
                 if v.installed {
                     state.latest = state.latest.max(v.tag);
@@ -813,6 +894,13 @@ impl Coordinator for GusCoordinator {
                     state.offers.insert(v.id, v);
                 }
             }
+            self.core.stats.retained.store(
+                states
+                    .values()
+                    .map(|s| (s.versions.len() + s.offers.len()) as u64)
+                    .sum(),
+                Ordering::Relaxed,
+            );
             self.core.incarnation.store(next, Ordering::Release);
             Ok(())
         })

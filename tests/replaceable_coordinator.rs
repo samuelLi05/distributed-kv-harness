@@ -108,3 +108,24 @@ async fn peer_handshake_rejects_conflicting_placement_configuration() {
     );
     cluster.shutdown().await;
 }
+
+#[tokio::test]
+async fn peer_handshake_rejects_the_legacy_protocol_generation() {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpStream,
+    };
+    let c = Cluster::local(2).await;
+    let mut stream = TcpStream::connect(c.config.nodes[1].peer).await.unwrap();
+    let hello =
+        serde_json::to_vec(&json!({"wire_version":1,"from":1,"to":2,"config":&*c.config})).unwrap();
+    stream.write_u32(hello.len() as u32).await.unwrap();
+    stream.write_all(&hello).await.unwrap();
+    let len = stream.read_u32().await.unwrap() as usize;
+    assert!(len < 4096);
+    let mut body = vec![0; len];
+    stream.read_exact(&mut body).await.unwrap();
+    let result: Result<(), KvError> = serde_json::from_slice(&body).unwrap();
+    assert!(matches!(result,Err(e) if e.kind==distributed_kv_harness::types::ErrorKind::Protocol));
+    c.shutdown().await;
+}

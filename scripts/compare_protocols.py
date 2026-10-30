@@ -35,7 +35,7 @@ def metrics(run):
         for kind in ("successful_service_ns","successful_scheduled_ns"):
             result[f"{method.lower()}_{kind}_p99_ms"]=stats[kind]["p99"]/1e6 if stats else None
     before=run["resources_before"];after=run["resources_after"]
-    for key in ("fast_writes","retags","fast_reads","read_transfers","view_messages","background_errors","writes","local_reads","replays","validations","stale_vals","sync_batches","synced_reads","retained_versions"):
+    for key in ("fast_writes","retags","fast_reads","read_transfers","read_retries","view_messages","background_errors","writes","local_reads","replays","validations","stale_vals","sync_batches","synced_reads","retained_versions"):
         result[f"protocol_{key}"]=sum(b["diagnostics"].get(key,0)-a["diagnostics"].get(key,0) for a,b in zip(before,after))
     result["retained_versions_after"]=sum(s["diagnostics"].get("retained_versions",0) for s in after)
     result["alr_reads_per_batch"]=result["protocol_synced_reads"]/result["protocol_sync_batches"] if result["protocol_sync_batches"] else None
