@@ -40,14 +40,17 @@ def main():
     manifest_path.write_text(json.dumps(manifest,indent=2))
     for study in manifest['studies']:
         target=root/study['name']
+        command=study['command']
         if target.exists():
             results=target/'results.json'
             inactive=all(not json.loads(p.read_text())["active"] for p in target.glob('processes-*.json'))
             if args.resume and inactive and results.exists() and len(json.loads(results.read_text()))==study['expected_runs']:
                 print(f"Skipping complete study {study['name']}",flush=True);continue
-            raise RuntimeError(f"Incomplete study at {target}; preserve it, then move it aside before resuming. We do not silently mix a partially retained dataset with a fresh cluster.")
+            if not args.resume or not inactive:
+                raise RuntimeError(f"Study at {target} exists or has an active process manifest; reconcile it before resuming")
+            command=[*command,'--resume']
         print(f"Starting {study['name']} ({study['expected_runs']} measured runs)",flush=True)
-        subprocess.run(study['command'],check=True)
+        subprocess.run(command,check=True)
     paths=[str(root/s['name']) for s in manifest['studies']]
     subprocess.run([sys.executable,'scripts/compare_protocols.py',*paths,'--output',str(root/'report')],check=True)
     with (root/'audit.json').open('w') as output:

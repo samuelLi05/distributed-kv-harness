@@ -26,6 +26,53 @@ WORKLOADS = {
 }
 
 
+def resume_batches(output, metadata, expected):
+    """Keep complete fresh-cluster batches; archive every artifact of incomplete ones."""
+    previous = json.loads((output / "environment.json").read_text())
+    normalize = lambda a: {k: v for k, v in a.items() if k != "resume"}
+    if normalize(previous["arguments"]) != normalize(metadata["arguments"]):
+        raise RuntimeError("resume arguments differ")
+    if previous["binaries_sha256"] != metadata["binaries_sha256"]:
+        raise RuntimeError("resume binary build differs")
+    if any(json.loads(p.read_text())["active"] for p in output.glob("processes-*.json")):
+        raise RuntimeError("a process manifest is active; stop and reconcile it before resuming")
+    path = output / "results.json"
+    rows = json.loads(path.read_text()) if path.exists() else []
+    group = lambda r: (r["case"]["nodes"], r["case"]["protocol"])
+    if any(group(r) not in expected for r in rows):
+        raise RuntimeError("unexpected result batch")
+    complete = set()
+    for cohort, cases in expected.items():
+        batch = [r for r in rows if group(r) == cohort]
+        actual = [(r["case"]["workload"], r["case"]["rate"], r["case"]["repeat"]) for r in batch]
+        if len(actual) == len(cases) and set(actual) == cases and all(r["settled"] for r in batch):
+            count, protocol = cohort
+            if not all((output / f"n{count}-{protocol}-{w}-r{rate}-rep{rep}.samples.jsonl.gz").exists() for w, rate, rep in cases):
+                raise RuntimeError("complete batch is missing raw samples")
+            complete.add(cohort)
+    event = output / "resumes" / str(len(list((output / "resumes").glob("*"))) + 1)
+    event.mkdir(parents=True)
+    (event / "environment.json").write_text(json.dumps(metadata, indent=2))
+    archived = []
+    for count, protocol in expected.keys() - complete:
+        patterns = (f"cluster-{count}-{protocol}.json", f"idle-{count}-{protocol}.json",
+                    f"processes-{count}-{protocol}.json", f"server-{count}-{protocol}-*",
+                    f"preload-{count}-{protocol}.*", f"n{count}-{protocol}-*")
+        files = sorted({p for pattern in patterns for p in output.glob(pattern)})
+        if files:
+            target = event / f"aborted-{count}-{protocol}"
+            target.mkdir()
+            for p in files:
+                shutil.move(str(p), target / p.name)
+            old = [r for r in rows if group(r) == (count, protocol)]
+            (target / "results.json").write_text(json.dumps(old, indent=2))
+            archived.append({"nodes": count, "protocol": protocol, "measured_runs": len(old)})
+    rows = [r for r in rows if group(r) in complete]
+    (event / "checkpoint.json").write_text(json.dumps({"kept_runs": len(rows), "archived": archived}, indent=2))
+    path.write_text(json.dumps(rows, indent=2))
+    return rows, complete, event / "source"
+
+
 def get_status(address):
     host, port = address.split(":")
     connection = http.client.HTTPConnection(host, int(port), timeout=10)
@@ -116,6 +163,7 @@ def main():
     parser.add_argument("--keys", type=int, default=100000)
     parser.add_argument("--payload", type=int, default=1024)
     parser.add_argument("--workers", type=int, default=128)
+    parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     counts = [int(n) for n in args.nodes.split(",")]
     protocols = args.protocols.split(",")
@@ -126,7 +174,7 @@ def main():
     assert all(w in WORKLOADS for w in workloads)
     assert args.repeats > 0 and args.seconds > 0 and args.keys > 0
     output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(parents=True, exist_ok=args.resume)
     binary, bench = args.binary.resolve(strict=True), args.driver.resolve(strict=True)
     registry = {d["name"]: d for d in json.loads(subprocess.check_output([str(binary), "--protocols"], text=True))}
     assert all(p in registry and registry[p]["replicas"] == 3 for p in protocols)
@@ -142,8 +190,14 @@ def main():
         "physical_hosts": 1, "cpu_measurement": "self getrusage, microsecond CPU accounting; peak RSS since process boot",
         "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    cases = [(w, args.hot_low_rate if w == "hot_mixed" and args.hot_low_rate and rate == min(rates) else rate) for w in workloads for rate in rates]
+    expected = {(n,p): {(w,rate,rep) for w,rate in cases for rep in range(args.repeats)} for n in counts for p in protocols}
+    if args.resume:
+        rows, completed, source = resume_batches(output, metadata, expected)
+    else:
+        rows, completed, source = [], set(), output / "source"
+        (output / "environment.json").write_text(json.dumps(metadata, indent=2))
     # Snapshot sources too: HEAD alone does not identify an uncommitted experiment.
-    source = output / "source"
     source.mkdir()
     for name in ("Cargo.toml", "Cargo.lock", "src", "scripts", "tests", "configs"):
         path = Path(name)
@@ -151,10 +205,11 @@ def main():
             shutil.copytree(path, source / name, ignore=shutil.ignore_patterns("__pycache__"))
         else:
             shutil.copy2(path, source / name)
-    (output / "environment.json").write_text(json.dumps(metadata, indent=2))
-    rows = []
     for count in counts:
         for protocol in protocols:
+            if (count, protocol) in completed:
+                print(f"Skipping complete RF=3 batch: {count} nodes, {protocol}", flush=True)
+                continue
             processes, reservations = [], []
             with tempfile.TemporaryDirectory(prefix="kv-benchmark-") as temp:
                 root = Path(temp)
@@ -199,7 +254,6 @@ def main():
                     time.sleep(2)
                     idle_after = [get_status(node["http"]) for node in config["nodes"]]
                     (output / f"idle-{count}-{protocol}.json").write_text(json.dumps({"seconds":2,"before":idle_before,"after":idle_after}, indent=2))
-                    cases = [(w, args.hot_low_rate if w == "hot_mixed" and args.hot_low_rate and rate == min(rates) else rate) for w in workloads for rate in rates]
                     for repeat in range(args.repeats):
                         # Rotate case order; paired protocol runs retain identical request seeds.
                         order = cases[repeat % len(cases):] + cases[:repeat % len(cases)]

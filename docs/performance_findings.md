@@ -21,6 +21,10 @@ At 4,000 offered requests/s, median static-Hermes success rate increased from 25
 
 Artifacts: `outputs/replay-before`, `outputs/replay-after`, and `outputs/replay-comparison`. Each contains configurations, seeds, source/binary identity, counters and compressed samples.
 
+## Preserved preload failure
+
+The large-dataset suite was interrupted during the six-node ALR preload. There were 128 uncertain failures out of 100,000 requests, clustered immediately after a 7.5 s completion gap. Its cause is unresolved; neither protocol failure nor a host-wide scheduling/storage stall is established by the counters. The failed batch is archived under `outputs/modular-comparison/core/resumes/1/aborted-6-hermes_alr_static`. The suite resumes whole fresh-cluster batches with unchanged server/driver hashes. Checkpoints archive incomplete batches before rerunning them from fresh state.
+
 ## Measurement method
 
 Added symmetric per-RPC latency without serializing requests on a connection writer. A concurrent-request test verifies pipelining. Six-node RF=3 groups are used for routing experiments because three nodes make every ingress an owner.

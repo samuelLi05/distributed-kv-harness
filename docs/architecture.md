@@ -33,3 +33,7 @@ References: [Hermes, ASPLOS 2020](https://vasigavr1.github.io/files/Hermes-ASPLO
 Read repair now has a distinct conditional apply mode, with the freshness check inside the serialized worker. A newer receiver rejects the copy and the reader refreshes its evidence. Only the original writer can issue a larger-tag commit. Delayed offers preserve prior installation and the original acceptance ACK rather than downgrading the durable installed flag or incorrectly causing another retag. Receipt/writer messages are restricted to the owning cohort.
 
 Gus now rejects old experimental state schemas and the shared transport rejects the earlier wire generation. All servers in an experiment use the same build. Retained bookkeeping entries are counted incrementally, removing a dataset scan from the status/measurement path.
+
+## Benchmark checkpoints
+
+Benchmark resume validates identical binary hashes and parameters, refuses active process manifests, retains complete fresh-cluster batches, and archives an incomplete batch's samples, logs, configuration and partial results before recreating that entire batch from fresh directories. It never retries individual mutations. Resume source/environment snapshots are retained alongside the original provenance.
