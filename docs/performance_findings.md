@@ -26,3 +26,18 @@ Artifacts: `outputs/replay-before`, `outputs/replay-after`, and `outputs/replay-
 Added symmetric per-RPC latency without serializing requests on a connection writer. A concurrent-request test verifies pipelining. Six-node RF=3 groups are used for routing experiments because three nodes make every ingress an owner.
 
 Outgoing RPCs are now counted through reply/expiry even when a quorum cancels its caller. WAL/apply/background work is counted independently. Resource snapshots require a quiet pending-work boundary; runs that cannot settle are flagged. Continuous RSS polling was removed when snapshots are enabled, because getrusage already preserves the process high-water mark.
+
+## Shared transport I/O and idle wakeups
+
+Peer frames are serialized with their length prefix into one buffer and written together. Persistent readers buffer frame headers/payloads. Idle connections stop polling the expiry timer when there are no outstanding calls, with missed timer ticks skipped. A reply write that fails or times out closes its write half, preventing a later frame from being appended to an incomplete payload; a duplex-stream regression test covers that case.
+
+Controlled A/B: three nodes, 2,000 keys, 1 KiB objects, five-second windows, one-second warmup, three repetitions. Table below is read-only, so there are no WAL writes during measurement. Both offered rates remained below the experiment's read throughput limit; this measures cost/latency improvements, not increased maximum throughput.
+
+| Protocol | Offered/s | CPU µs/op before → after | GET service p99 ms before → after | Peer B/op before → after |
+| --- | ---: | ---: | ---: | ---: |
+| abd_basic | 250 | 1292 → 825 | 1.46 → 1.22 | 4948 → 4948 |
+| abd_basic | 4000 | 390 → 300 | 5.15 → 2.02 | 4939 → 4939 |
+| abd | 250 | 746 → 510 | 1.10 → 1.07 | 2424 → 2424 |
+| abd | 4000 | 266 → 174 | 1.82 → 1.29 | 2423 → 2423 |
+
+At 4,000 offered reads/s, fast ABD used about 35% less server CPU and reduced GET service p99 by about 29%, with the same application peer bytes and unchanged durability/coordination rules. All 48 control runs had zero response errors and zero generator rejections. These are local measurements; packet counts were not captured. Artifacts: `outputs/framing-before`, `outputs/framing-after`, `outputs/framing-comparison`.

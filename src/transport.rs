@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::{Mutex, Semaphore, mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
@@ -196,21 +196,21 @@ async fn write_frame<W: AsyncWrite + Unpin, T: Serialize>(
     value: &T,
     metrics: &Metrics,
 ) -> Result<(), KvError> {
-    let bytes = serde_json::to_vec(value)?;
-    if bytes.len() > MAX_FRAME {
+    let mut bytes = Vec::with_capacity(128);
+    bytes.extend_from_slice(&[0; 4]);
+    serde_json::to_writer(&mut bytes, value)?;
+    let payload_len = bytes.len() - 4;
+    if payload_len > MAX_FRAME {
         return Err(KvError::invalid("peer frame exceeds 2 MiB"));
     }
-    writer
-        .write_u32(bytes.len() as u32)
-        .await
-        .map_err(|e| KvError::unavailable(e.to_string()))?;
+    bytes[..4].copy_from_slice(&(payload_len as u32).to_be_bytes());
     writer
         .write_all(&bytes)
         .await
         .map_err(|e| KvError::unavailable(e.to_string()))?;
     metrics
         .peer_bytes_sent
-        .fetch_add(4 + bytes.len() as u64, Ordering::Relaxed);
+        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
     Ok(())
 }
 
@@ -334,7 +334,8 @@ async fn run_connection(
     rx: &mut mpsc::Receiver<Call>,
     metrics: Arc<Metrics>,
 ) {
-    let (mut reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
     let (received, mut incoming) = mpsc::channel(MAX_PENDING);
     let reader_metrics = metrics.clone();
     let _reader_task = AbortReader(tokio::spawn(async move {
@@ -356,6 +357,7 @@ async fn run_connection(
         .await
         .err();
     let mut tick = interval(Duration::from_millis(100));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     while failure.is_none() {
         tokio::select! {
             call = rx.recv() => match call {
@@ -367,7 +369,7 @@ async fn run_connection(
                 Some(Err(error)) => { failure = Some(error); }
                 None => break,
             },
-            _ = tick.tick() => { pending.retain(|_, call| call.expires>Instant::now()); }
+            _ = tick.tick(), if !pending.is_empty() => { pending.retain(|_, call| call.expires>Instant::now()); }
         }
     }
     let error = failure.unwrap_or_else(|| {
@@ -435,8 +437,9 @@ async fn serve_connection(
         return;
     }
     let _ = stream.set_nodelay(true);
-    let (mut reader, writer) = stream.into_split();
-    let writer = Arc::new(Mutex::new(writer));
+    let (reader, writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let writer = Arc::new(Mutex::new(Some(writer)));
     let mut handlers = JoinSet::new();
     let capacity = Arc::new(Semaphore::new(128));
     loop {
@@ -472,27 +475,72 @@ async fn serve_connection(
             if config.benchmark_peer_rtt_ms > 0 {
                 tokio::time::sleep(Duration::from_micros(config.benchmark_peer_rtt_ms * 500)).await;
             }
-            let mut writer = writer.lock().await;
-            if matches!(
-                timeout(
-                    deadline,
-                    write_frame(
-                        &mut *writer,
-                        &Reply {
-                            id: request.id,
-                            result
-                        },
-                        &metrics
-                    )
-                )
-                .await,
-                Ok(Ok(()))
-            ) {
-                metrics.rpc_replies_sent.fetch_add(1, Ordering::Relaxed);
-            }
+            let _ = write_reply(
+                &writer,
+                &Reply {
+                    id: request.id,
+                    result,
+                },
+                &metrics,
+                deadline,
+            )
+            .await;
         });
         while handlers.try_join_next().is_some() {}
     }
     handlers.abort_all();
     while handlers.join_next().await.is_some() {}
+}
+
+/// A cancelled partial frame poisons this write half; another reply must never be
+/// appended to its incomplete payload. Dropping the write half signals EOF.
+async fn write_reply<W: AsyncWrite + Unpin>(
+    writer: &Mutex<Option<W>>,
+    reply: &Reply,
+    metrics: &Metrics,
+    deadline: Duration,
+) -> bool {
+    let mut guard = writer.lock().await;
+    let Some(writer) = guard.as_mut() else {
+        return false;
+    };
+    if matches!(
+        timeout(deadline, write_frame(writer, reply, metrics)).await,
+        Ok(Ok(()))
+    ) {
+        metrics.rpc_replies_sent.fetch_add(1, Ordering::Relaxed);
+        true
+    } else {
+        guard.take();
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn timed_out_partial_reply_closes_the_stream_before_another_reply() {
+        let (writer, mut reader) = tokio::io::duplex(32);
+        let writer = Mutex::new(Some(writer));
+        let metrics = Metrics::default();
+        let first = Reply {
+            id: 1,
+            result: Ok(serde_json::json!({"large":"x".repeat(1024)})),
+        };
+        assert!(!write_reply(&writer, &first, &metrics, Duration::from_millis(5)).await);
+        let next = Reply {
+            id: 2,
+            result: Ok(Value::Null),
+        };
+        assert!(!write_reply(&writer, &next, &metrics, Duration::from_millis(5)).await);
+        let mut partial = Vec::new();
+        timeout(Duration::from_secs(1), reader.read_to_end(&mut partial))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(partial.len(), 32);
+        assert!(u32::from_be_bytes(partial[..4].try_into().unwrap()) as usize > partial.len() - 4);
+        assert_eq!(metrics.rpc_replies_sent.load(Ordering::Relaxed), 0);
+    }
 }

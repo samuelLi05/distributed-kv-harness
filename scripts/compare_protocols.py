@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import statistics
 
-AXES=("nodes","protocol","workload","rate","ingress","peer_rtt_ms","keys","payload_bytes","replay_grace_ms","seconds","warmup_seconds","workers","build")
+AXES=("nodes","protocol","workload","rate","ingress","peer_rtt_ms","keys","payload_bytes","replay_grace_ms","seconds","warmup_seconds","workers","build","delete_percent")
 def metrics(run):
     successes=run["successes"]
     def per(value): return value/successes if successes else None
@@ -55,7 +55,7 @@ def main():
             case={**run["case"],"keys":run["spec"]["keys"],"payload_bytes":run["spec"]["payload_bytes"]}
             case.setdefault("peer_rtt_ms",0)
             case["replay_grace_ms"]=run["resources_after"][0]["diagnostics"].get("replay_grace_ms",0)
-            for option in ("seconds","warmup_seconds","workers"):case[option]=run["spec"][option]
+            for option in ("seconds","warmup_seconds","workers","delete_percent"):case[option]=run["spec"][option]
             case["build"]=environment["binaries_sha256"]["server"]+":"+environment["binaries_sha256"]["driver"]
             profiles[case["protocol"]]=run["protocol"]
             key=tuple(case[a] for a in AXES);values=metrics(run)
@@ -80,11 +80,18 @@ def main():
         "CPU and peer/WAL costs divide all measured and drained work by successful measured operations. Throughput counts completions inside the scheduled window. Successful scheduled p99 includes client queue delay; errors/rejections remain separate. Peak RSS is since boot, including preload/earlier cases. Peer frames count requests and responses once, excluding handshake frames; bytes include framing/handshakes and exclude HTTP and TCP/IP headers.","",
         "## Declared contracts","","| Protocol | Majority write progress | Experimental | Ingress |","| --- | --- | --- | --- |"]
     for name,d in sorted(profiles.items()):lines.append(f"| {name} | {'yes' if d['majority_progress'] else 'no'} | {d['experimental']} | {d['ingress']} |")
-    lines += ["","Fixed-membership Hermes cannot be ranked as having ABD/Gus availability. Its ALR mode measures checks against an immutable epoch, not full configuration recovery.","",
-        "## Per-case medians","","| N | Protocol | Workload | Offered/s | Ingress | Added RTT ms | Replay grace ms | Success/s | Reject % | Other errors | CPU µs/success | Peer B/success | GET scheduled p99 ms | PUT scheduled p99 ms |","| ---: | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    lines += ["","Fixed-membership Hermes cannot be ranked as having ABD/Gus availability. Its ALR mode measures checks against an immutable epoch, not full configuration recovery."]
+    profile_axes=("keys","payload_bytes","seconds","warmup_seconds","workers","build","delete_percent")
+    profile_groups={}
+    for row in aggregates:profile_groups.setdefault(tuple(row[k] for k in profile_axes),[]).append(row)
     def fmt(value):return "—" if value is None else f"{value:.2f}"
-    for r in aggregates:
-        lines.append(f"| {r['nodes']} | {r['protocol']} | {r['workload']} | {r['rate']} | {r['ingress']} | {r['peer_rtt_ms']} | {r['replay_grace_ms']} | {r['successful_qps']:.0f} | {r['generator_reject_percent']:.2f} | {r['other_errors']:.0f} | {fmt(r['cpu_us_per_success'])} | {fmt(r['peer_bytes_per_success'])} | {fmt(r['get_successful_scheduled_ns_p99_ms'])} | {fmt(r['put_successful_scheduled_ns_p99_ms'])} |")
+    for profile,subset in sorted(profile_groups.items()):
+        keys,payload,seconds,warmup,workers,build,deletes=profile
+        lines += ["",f"## {keys:,} keys; {payload:,} B; {seconds:g} s window; {warmup:g} s warmup; {workers} workers; build {build[:8]}; {deletes}% of mutations DELETE","",
+            "| N | Protocol | Workload | Offered/s | Ingress | Added RTT ms | Replay grace ms | Success/s | Reject % | Other errors | CPU µs/success | Peer B/success | GET scheduled p99 ms | PUT scheduled p99 ms |",
+            "| ---: | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+        for r in subset:
+            lines.append(f"| {r['nodes']} | {r['protocol']} | {r['workload']} | {r['rate']} | {r['ingress']} | {r['peer_rtt_ms']} | {r['replay_grace_ms']} | {r['successful_qps']:.0f} | {r['generator_reject_percent']:.2f} | {r['other_errors']:.0f} | {fmt(r['cpu_us_per_success'])} | {fmt(r['peer_bytes_per_success'])} | {fmt(r['get_successful_scheduled_ns_p99_ms'])} | {fmt(r['put_successful_scheduled_ns_p99_ms'])} |")
     lines += ["","## Reproduction","","Each input directory contains exact specifications/configurations, seeds, source snapshots, binary SHA256 hashes, before/after resources, summaries, server logs and compressed request samples. Warmup shares measured worker connections, values change, and unsettled runs are flagged rather than silently discarded. CPU comparisons include each adapter's state indexing/serialization choices; common infrastructure alone does not isolate theoretical protocol cost.","",
         "```sh","python3 scripts/compare_protocols.py RUN_DIRECTORY ... --output REPORT_DIRECTORY","```",""]
     (args.output/"measurements.md").write_text("\n".join(lines));print(f"Summarized {len(runs)} runs into {args.output}")

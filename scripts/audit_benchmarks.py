@@ -36,6 +36,9 @@ def main():
             counters=summary['server_metrics_delta']
             if not counts['uncertain_delivery']:
                 assert sum(m['http_requests'] for m in counters)==counts['dispatched'],path
+            if summary['errors']==summary['rejected']:
+                assert sum(m['rpc_requests_sent']-m['rpc_requests_received'] for m in counters)==0,(path,'request frame boundary')
+                assert sum(m['rpc_replies_sent']-m['rpc_replies_received'] for m in counters)==0,(path,'reply frame boundary')
             assert all(s['metrics']['work_pending']==0 for s in summary['resources_before']+summary['resources_after']),path
             total+=counts['offered'];runs+=1
     print(json.dumps({'runs':runs,'raw_samples':total,'other_error_categories':[{ 'status':s,'error':e,'count':n} for (s,e),n in categories.items()]},indent=2))

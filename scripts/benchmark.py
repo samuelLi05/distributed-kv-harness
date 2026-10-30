@@ -111,6 +111,7 @@ def main():
     parser.add_argument("--warmup", type=float, default=3)
     parser.add_argument("--peer-rtt-ms", type=int, default=0)
     parser.add_argument("--hot-low-rate", type=int)
+    parser.add_argument("--delete-percent", type=int, default=0)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--keys", type=int, default=100000)
     parser.add_argument("--payload", type=int, default=1024)
@@ -176,6 +177,8 @@ def main():
                         reservations[2*i+1].close()
                         with (output / f"server-{count}-{protocol}-{i+1}.log").open("wb") as log:
                             processes.append(subprocess.Popen([str(binary), "--config", str(config_path), "--node", str(i+1), "--data-dir", str(root / str(i+1))], stdout=log, stderr=subprocess.STDOUT, env={**os.environ, "TOKIO_WORKER_THREADS": "2", "RUST_LOG": "warn"}))
+                    process_record=output / f"processes-{count}-{protocol}.json"
+                    process_record.write_text(json.dumps({"active":True,"servers":[{"node":node["id"],"pid":process.pid} for node,process in zip(config["nodes"],processes)]},indent=2))
                     for node, process in zip(config["nodes"], processes):
                         deadline = time.monotonic()+20
                         while True:
@@ -189,7 +192,7 @@ def main():
                                     raise
                                 time.sleep(0.02)
                     base = {"config": str(config_path), "mode": "preload", "rate": 1000, "seconds": args.seconds,
-                            "keys": args.keys, "active_keys": args.keys, "mutation_percent": 100, "delete_percent": 0,
+                            "keys": args.keys, "active_keys": args.keys, "mutation_percent": 100, "delete_percent": args.delete_percent,
                             "payload_bytes": args.payload, "ingress": "owner", "workers": args.workers, "seed": 7163, "capture_resources": True}
                     driver(bench, output, f"preload-{count}-{protocol}", base, config["nodes"])
                     idle_before = [get_status(node["http"]) for node in config["nodes"]]
@@ -228,6 +231,8 @@ def main():
                             print(f"{name}: {qps:.0f} successful/s, {result['errors']} errors, {result['rejected']} generator rejects", flush=True)
                 finally:
                     stop(processes)
+                    if processes:
+                        (output / f"processes-{count}-{protocol}.json").write_text(json.dumps({"active":False,"servers":[{"node":i+1,"pid":p.pid} for i,p in enumerate(processes)]},indent=2))
                     for sock in reservations:
                         sock.close()
     print(f"Saved {len(rows)} measured runs and raw compressed samples to {output}")
